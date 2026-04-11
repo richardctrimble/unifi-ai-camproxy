@@ -2,7 +2,11 @@ version: "3.8"
 
 services:
   unifi-ai-port:
-    build: .
+    build:
+      context: .
+      args:
+        # Override via docker-compose.gpu.yml for CUDA builds.
+        TORCH_DEVICE: cpu
     image: unifi-ai-port:latest
     container_name: unifi-ai-port
     restart: unless-stopped
@@ -11,11 +15,7 @@ services:
       - ./config:/config        # mount your config.yml here
     environment:
       - PYTHONUNBUFFERED=1
-    # Uncomment for GPU support (requires nvidia-container-toolkit):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+
+# For GPU acceleration, layer docker-compose.gpu.yml on top:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# That override sets TORCH_DEVICE=cu121 and reserves the nvidia device.

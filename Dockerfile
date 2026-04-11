@@ -27,7 +27,20 @@ WORKDIR /app
 COPY --from=proxy-builder /build/unifi-cam-proxy /app/unifi-cam-proxy
 RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
 
-# Python deps for our AI stack
+# ── PyTorch wheel selection ───────────────────────────────────────────────────
+# TORCH_DEVICE picks which PyTorch wheel index to install from:
+#   cpu    → CPU-only (default, ~800MB image)
+#   cu121  → CUDA 12.1 (GPU, ~2.5GB image, needs nvidia-container-toolkit)
+#   cu118  → CUDA 11.8 (older drivers)
+# Override with: docker compose build --build-arg TORCH_DEVICE=cu121
+# or use docker-compose.gpu.yml which sets it for you.
+ARG TORCH_DEVICE=cpu
+RUN pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/${TORCH_DEVICE} \
+      torch torchvision
+
+# Python deps for our AI stack (ultralytics will see torch is already
+# present and not re-install a different flavour over the top).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

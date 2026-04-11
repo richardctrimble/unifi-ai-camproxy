@@ -70,6 +70,23 @@ class AIEngine:
         self.logger.info(f"Loading YOLO model: {model_path}")
         self.model = YOLO(model_path)
 
+        # Pick the best available inference device. `ai.device` in
+        # config can force a specific one ("cpu" / "cuda" / "mps") or
+        # stay on "auto" (default) to autodetect. We ask torch directly
+        # rather than relying on ultralytics' implicit behaviour so the
+        # choice is visible in the logs and overridable.
+        self.device = self._resolve_device(config.get("device", "auto"))
+        self.logger.info("Running inference on: %s", self.device)
+        try:
+            self.model.to(self.device)
+        except Exception as e:
+            self.logger.warning(
+                "Could not move model to %s (%s); falling back to cpu",
+                self.device, e,
+            )
+            self.device = "cpu"
+            self.model.to("cpu")
+
         self.detect_persons = config.get("detect_persons", True)
         self.detect_vehicles = config.get("detect_vehicles", True)
 
@@ -95,6 +112,41 @@ class AIEngine:
         self.line_detector = LineCrossingDetector(
             lines_config, logger=logger.getChild("lc")
         )
+
+    # ─── Device resolution ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_device(preference: str) -> str:
+        """
+        Return the torch device name we should actually use.
+
+        preference ∈ {"auto", "cpu", "cuda", "mps"}
+          - "auto" picks the best available: cuda > mps > cpu
+          - explicit names are honoured if actually available,
+            otherwise we log and fall back to cpu
+        """
+        preference = (preference or "auto").lower()
+
+        try:
+            import torch
+        except ImportError:
+            return "cpu"
+
+        cuda_ok = torch.cuda.is_available()
+        mps_ok = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+
+        if preference == "auto":
+            if cuda_ok:
+                return "cuda"
+            if mps_ok:
+                return "mps"
+            return "cpu"
+
+        if preference == "cuda":
+            return "cuda" if cuda_ok else "cpu"
+        if preference == "mps":
+            return "mps" if mps_ok else "cpu"
+        return "cpu"
 
     # ─── Public API ─────────────────────────────────────────────────────────
 
@@ -164,7 +216,7 @@ class AIEngine:
 
     def _run_inference(self, frame: np.ndarray):
         h, w = frame.shape[:2]
-        results = self.model(frame, verbose=False)[0]
+        results = self.model(frame, verbose=False, device=self.device)[0]
 
         current_detections = []
 

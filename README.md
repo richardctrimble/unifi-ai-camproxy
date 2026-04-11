@@ -72,6 +72,30 @@ a `mac:` manually if you want to pick your own.
 | yolov8s.pt | Medium | Better   | ~600MB |
 | yolov8m.pt | Slower | Best     | ~1.2GB |
 
+## Acceleration
+
+By default the image ships CPU-only PyTorch — fine for most setups, up to
+~4-6 cameras on a modest x86 box with `yolov8n`. For hardware acceleration:
+
+### NVIDIA GPU (CUDA)
+
+Requires an NVIDIA GPU on the host, a recent driver, and
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Then layer the GPU override on top of the base compose file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+The override swaps the CPU PyTorch wheels for CUDA 12.1 (`cu121`) and reserves
+the GPU for the container. Check `docker compose logs -f` on startup — the
+AIEngine logs `Running inference on: cuda` when the GPU is live, or `cpu` if
+something went wrong with the passthrough.
+
+You can also force the device via config (`ai.device: cuda`) — but it'll fall
+back to CPU if CUDA isn't actually available inside the container, so the
+build override is the real switch.
+
 ## Virtual line crossing
 
 Lines are defined per-camera as two points in normalised (0–1) coordinates

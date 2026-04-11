@@ -280,6 +280,8 @@ cameras:
 - [x] Auto accept of pending adoption via Protect API (no UI click-through)
 - [x] Line crossing actually plumbed through the tracker (was instantiated-but-dead in the first version)
 - [x] Embedded web tool at port 8091 for drawing lines on live frames, iPad-friendly
+- [x] Per-class confidence thresholds (person vs vehicle) — shared `confidence` is still the fallback
+- [x] Device auto-detection (cuda > mps > cpu) with explicit logging; NVIDIA CUDA support via `docker-compose.gpu.yml` override that swaps in the CUDA PyTorch wheels and reserves the GPU
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
 
 ---
