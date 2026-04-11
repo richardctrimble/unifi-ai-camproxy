@@ -96,6 +96,41 @@ You can also force the device via config (`ai.device: cuda`) — but it'll fall
 back to CPU if CUDA isn't actually available inside the container, so the
 build override is the real switch.
 
+### Intel iGPU / dGPU / NPU (OpenVINO)
+
+For Intel N100-class mini PCs and similar — the chip in a £100 Beelink box
+can run YOLOv8n 2–3× faster on its integrated UHD graphics than on its
+own CPU cores, via Intel's OpenVINO runtime. Also works for Intel Arc
+discrete GPUs and Meteor/Arrow Lake NPUs.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d --build
+```
+
+Then in `config/config.yml` set `ai.device` to one of:
+
+| Value | Target | Notes |
+|---|---|---|
+| `intel:gpu` | Integrated or discrete Intel GPU | Best default for N100 etc. |
+| `intel:cpu` | Intel CPU via OpenVINO | Often faster than native PyTorch CPU |
+| `intel:npu` | Meteor Lake / Arrow Lake NPU | Bleeding edge, lowest power |
+
+On first run YOLOv8 is exported to OpenVINO IR format (one-time, ~30s);
+the result is cached under `./config/yolov8n_openvino_model/` so restarts
+are instant.
+
+Requirements on the host: an Intel iGPU/dGPU with the in-kernel driver
+(standard on any modern Linux — check `ls /dev/dri`), and the docker user
+in the `render` group so the container can reach `/dev/dri/renderD128`:
+
+```bash
+sudo usermod -aG render $USER && newgrp render
+```
+
+Confirm it worked by checking `docker compose logs -f` for
+`Running inference on: intel:gpu` on startup. `falling back to cpu` means
+the GPU wasn't reachable (usually a permissions issue on `/dev/dri`).
+
 ## Virtual line crossing
 
 Lines are defined per-camera as two points in normalised (0–1) coordinates

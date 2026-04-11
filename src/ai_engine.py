@@ -66,26 +66,22 @@ class AIEngine:
         self._latest_frame: Optional[np.ndarray] = None
         self._snapshot_path: Optional[Path] = None
 
-        model_path = config.get("model", "yolov8n.pt")
-        self.logger.info(f"Loading YOLO model: {model_path}")
-        self.model = YOLO(model_path)
-
         # Pick the best available inference device. `ai.device` in
-        # config can force a specific one ("cpu" / "cuda" / "mps") or
-        # stay on "auto" (default) to autodetect. We ask torch directly
-        # rather than relying on ultralytics' implicit behaviour so the
-        # choice is visible in the logs and overridable.
-        self.device = self._resolve_device(config.get("device", "auto"))
+        # config can force a specific one:
+        #   cpu | cuda | mps              — native PyTorch backends
+        #   intel:cpu | intel:gpu | intel:npu — OpenVINO backends for
+        #                                      Intel integrated GPU / NPU
+        #   auto                          — cuda > mps > cpu (never Intel,
+        #                                   because that needs opt-in)
+        # We resolve the choice up front so it's visible in the logs
+        # and overridable, rather than relying on ultralytics' implicit
+        # device handling.
+        requested_device = config.get("device", "auto")
+        self.device = self._resolve_device(requested_device)
         self.logger.info("Running inference on: %s", self.device)
-        try:
-            self.model.to(self.device)
-        except Exception as e:
-            self.logger.warning(
-                "Could not move model to %s (%s); falling back to cpu",
-                self.device, e,
-            )
-            self.device = "cpu"
-            self.model.to("cpu")
+
+        model_path = config.get("model", "yolov8n.pt")
+        self.model = self._load_model(model_path, self.device)
 
         self.detect_persons = config.get("detect_persons", True)
         self.detect_vehicles = config.get("detect_vehicles", True)
@@ -113,20 +109,44 @@ class AIEngine:
             lines_config, logger=logger.getChild("lc")
         )
 
-    # ─── Device resolution ──────────────────────────────────────────────────
+    # ─── Device resolution & model loading ──────────────────────────────────
 
     @staticmethod
     def _resolve_device(preference: str) -> str:
         """
-        Return the torch device name we should actually use.
+        Return the device name we should actually use.
 
-        preference ∈ {"auto", "cpu", "cuda", "mps"}
-          - "auto" picks the best available: cuda > mps > cpu
-          - explicit names are honoured if actually available,
-            otherwise we log and fall back to cpu
+        preference ∈ {
+            "auto",
+            "cpu", "cuda", "mps",        # native torch backends
+            "intel:cpu", "intel:gpu",    # OpenVINO backends (for Intel
+            "intel:npu",                 # iGPU / dGPU / NPU — N100 etc)
+        }
+
+        - "auto" picks cuda > mps > cpu. It never auto-picks Intel
+          because using OpenVINO means exporting the model to a
+          different format, so we only go there on explicit opt-in.
+        - explicit names are honoured if actually available,
+          otherwise we log and fall back to cpu.
         """
         preference = (preference or "auto").lower()
 
+        # ── Intel / OpenVINO path ──────────────────────────────────────────
+        if preference.startswith("intel:"):
+            try:
+                import openvino  # noqa: F401
+            except ImportError:
+                logger = logging.getLogger("ai_engine")
+                logger.warning(
+                    "ai.device=%s but openvino is not installed in this "
+                    "image — falling back to cpu. Rebuild with "
+                    "docker-compose.intel.yml to enable Intel acceleration.",
+                    preference,
+                )
+                return "cpu"
+            return preference  # e.g. "intel:gpu"
+
+        # ── PyTorch native path ────────────────────────────────────────────
         try:
             import torch
         except ImportError:
@@ -147,6 +167,50 @@ class AIEngine:
         if preference == "mps":
             return "mps" if mps_ok else "cpu"
         return "cpu"
+
+    def _load_model(self, model_path: str, device: str):
+        """
+        Load the YOLO model, picking between the native .pt path and
+        the OpenVINO IR path based on the resolved device.
+
+        For Intel/OpenVINO: ultralytics will export the .pt to an
+        OpenVINO IR directory on first run, which takes ~30s. We
+        cache the exported model under /config so subsequent restarts
+        are instant.
+        """
+        if device.startswith("intel:"):
+            from pathlib import Path as _Path
+
+            base = _Path(model_path).stem  # e.g. "yolov8n"
+            cache_dir = _Path("/config") / f"{base}_openvino_model"
+
+            if not cache_dir.exists():
+                self.logger.info(
+                    "Exporting %s to OpenVINO IR (one-time, ~30s)…", model_path
+                )
+                tmp = YOLO(model_path)
+                # ultralytics writes the export next to the source .pt;
+                # we move it to /config so it persists across rebuilds.
+                exported = tmp.export(format="openvino")
+                _Path(exported).rename(cache_dir)
+
+            self.logger.info("Loading OpenVINO model from %s", cache_dir)
+            model = YOLO(str(cache_dir))
+            return model
+
+        # Native torch path — just load and move to device.
+        self.logger.info("Loading YOLO model: %s", model_path)
+        model = YOLO(model_path)
+        try:
+            model.to(device)
+        except Exception as e:
+            self.logger.warning(
+                "Could not move model to %s (%s); falling back to cpu",
+                device, e,
+            )
+            self.device = "cpu"
+            model.to("cpu")
+        return model
 
     # ─── Public API ─────────────────────────────────────────────────────────
 
@@ -216,6 +280,10 @@ class AIEngine:
 
     def _run_inference(self, frame: np.ndarray):
         h, w = frame.shape[:2]
+        # For OpenVINO-exported models ultralytics expects the plugin
+        # name directly (e.g. "intel:gpu"). For native torch backends
+        # it expects "cpu"/"cuda"/"mps". Both cases work with the same
+        # self.device string — we just pass it straight through.
         results = self.model(frame, verbose=False, device=self.device)[0]
 
         current_detections = []

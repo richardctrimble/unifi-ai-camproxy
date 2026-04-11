@@ -42,12 +42,21 @@ cameras:
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
 
-      # Inference device. "auto" picks the best available:
-      #   cuda > mps > cpu. Override to force one.
-      # Note: the Docker image only ships CUDA runtime when built
-      # with docker-compose.gpu.yml — otherwise you're on CPU no
-      # matter what you put here.
-      device: "auto"           # auto | cpu | cuda | mps
+      # Inference device.
+      #   auto       — cuda > mps > cpu (never auto-picks Intel)
+      #   cpu        — force CPU
+      #   cuda       — NVIDIA GPU via docker-compose.gpu.yml
+      #   mps        — Apple Silicon (bare-metal, not inside Docker)
+      #   intel:gpu  — Intel integrated / discrete GPU via OpenVINO
+      #                (needs docker-compose.intel.yml)
+      #   intel:cpu  — OpenVINO on Intel CPU (often faster than native
+      #                PyTorch CPU, especially for N100-class chips)
+      #   intel:npu  — Meteor Lake / Arrow Lake NPU via OpenVINO
+      #
+      # Note: the image only ships the runtime for the accelerator
+      # you built for — with the default CPU image, "cuda" and
+      # "intel:gpu" will log a warning and fall back to CPU.
+      device: "auto"
 
       # Confidence thresholds.
       #   `confidence` is the fallback — used if you don't set a
