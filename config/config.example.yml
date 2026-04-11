@@ -41,7 +41,16 @@ cameras:
 
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
+
+      # Confidence thresholds.
+      #   `confidence` is the fallback — used if you don't set a
+      #   per-class override below.
+      #   Vehicles usually want a stricter threshold than people
+      #   because YOLO flips between car/truck/bus around ~0.5.
       confidence: 0.50
+      confidence_person: 0.45
+      confidence_vehicle: 0.60
+
       detect_persons: true
       detect_vehicles: true
       frame_skip: 3            # analyse every 3rd frame (lower = more CPU)

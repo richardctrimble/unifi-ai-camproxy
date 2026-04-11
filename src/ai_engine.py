@@ -72,7 +72,17 @@ class AIEngine:
 
         self.detect_persons = config.get("detect_persons", True)
         self.detect_vehicles = config.get("detect_vehicles", True)
-        self.confidence_threshold = config.get("confidence", 0.45)
+
+        # Per-class confidence thresholds. `confidence` is the shared
+        # fallback so existing configs keep working; `confidence_person`
+        # and `confidence_vehicle` override it per class. In practice
+        # vehicles want a stricter threshold than people (YOLO flips
+        # between car/truck/bus around ~0.5), so the defaults lean that
+        # way out of the box.
+        fallback = config.get("confidence", 0.45)
+        self.confidence_person = config.get("confidence_person", fallback)
+        self.confidence_vehicle = config.get("confidence_vehicle", fallback)
+
         self.frame_skip = config.get("frame_skip", 3)  # analyse every Nth frame
 
         self._tracked: dict[str, TrackedObject] = {}  # id → TrackedObject
@@ -162,14 +172,19 @@ class AIEngine:
             cls_id = int(box.cls[0])
             conf = float(box.conf[0])
 
-            if conf < self.confidence_threshold:
-                continue
-
+            # Resolve the class first so we can apply the right
+            # per-class threshold (persons are usually allowed in at
+            # a looser confidence than vehicles).
             if cls_id == PERSON_CLASS and self.detect_persons:
                 obj_type = "person"
+                threshold = self.confidence_person
             elif cls_id in VEHICLE_CLASSES and self.detect_vehicles:
                 obj_type = "vehicle"
+                threshold = self.confidence_vehicle
             else:
+                continue
+
+            if conf < threshold:
                 continue
 
             # Normalise bbox to 0-1

@@ -199,7 +199,7 @@ happy-ai-port/
 ### ai_engine.py — AIEngine
 - `detections()` — async generator, runs blocking OpenCV+YOLO in thread executor
 - `_capture_loop()` — blocking, runs in executor. Reconnects on stream loss with exponential backoff
-- `_run_inference()` — YOLO on every Nth frame (frame_skip), normalises bbox to 0-1
+- `_run_inference()` — YOLO on every Nth frame (frame_skip), normalises bbox to 0-1. Thresholds are resolved per class: `confidence_person` and `confidence_vehicle` override the shared `confidence` fallback. This lets you keep persons at e.g. 0.45 (catch distant pedestrians) while being stricter on vehicles at 0.60 (avoid car/truck/bus flip-flops from YOLO).
 - `_update_tracker()` — IoU matching, emits "start" on new object, "stop" after DEBOUNCE_STOP_FRAMES (10) missing frames. After every successful match it also runs `self.line_detector.check(prev_centroid, curr_centroid)` and emits an additional discrete "start" event with `line_crossing=<name>` when the centroid pair intersects a configured line.
 - `get_latest_frame()` — thread-racy but atomic read for the web tool
 - YOLO classes: PERSON=0, VEHICLES={2,3,5,7} (car, motorcycle, bus, truck)
