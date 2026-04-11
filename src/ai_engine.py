@@ -68,14 +68,17 @@ class AIEngine:
 
         # Pick the best available inference device. `ai.device` in
         # config can force a specific one:
-        #   cpu | cuda | mps              — native PyTorch backends
+        #   cpu | cuda | mps                  — native PyTorch backends
         #   intel:cpu | intel:gpu | intel:npu — OpenVINO backends for
-        #                                      Intel integrated GPU / NPU
-        #   auto                          — cuda > mps > cpu (never Intel,
-        #                                   because that needs opt-in)
-        # We resolve the choice up front so it's visible in the logs
-        # and overridable, rather than relying on ultralytics' implicit
-        # device handling.
+        #                                       Intel integrated GPU / NPU
+        #   auto                              — probe everything, pick the
+        #                                       fastest available in this
+        #                                       order: cuda > intel:gpu >
+        #                                       intel:npu > mps > cpu
+        #
+        # Because the image ships every runtime, `auto` is the right
+        # default — swap compose files to change device PASSTHROUGH
+        # without rebuilding, and the engine will re-probe at startup.
         requested_device = config.get("device", "auto")
         self.device = self._resolve_device(requested_device)
         self.logger.info("Running inference on: %s", self.device)
@@ -123,49 +126,93 @@ class AIEngine:
             "intel:npu",                 # iGPU / dGPU / NPU — N100 etc)
         }
 
-        - "auto" picks cuda > mps > cpu. It never auto-picks Intel
-          because using OpenVINO means exporting the model to a
-          different format, so we only go there on explicit opt-in.
-        - explicit names are honoured if actually available,
-          otherwise we log and fall back to cpu.
+        - "auto" probes every runtime the image carries and picks the
+          fastest one actually reachable, in order:
+              cuda → intel:gpu → intel:npu → mps → cpu
+          NVIDIA discrete GPUs almost always beat anything else here,
+          followed by an Intel iGPU/dGPU (via OpenVINO), then the NPU,
+          then Apple Silicon (bare-metal only), then plain CPU.
+        - explicit names are honoured if actually reachable, otherwise
+          we log and fall back to cpu.
         """
         preference = (preference or "auto").lower()
+        logger = logging.getLogger("ai_engine")
 
-        # ── Intel / OpenVINO path ──────────────────────────────────────────
-        if preference.startswith("intel:"):
+        # ── Probe helpers ──────────────────────────────────────────────────
+        def _cuda_ok() -> bool:
             try:
-                import openvino  # noqa: F401
-            except ImportError:
-                logger = logging.getLogger("ai_engine")
+                import torch
+                return torch.cuda.is_available()
+            except Exception:
+                return False
+
+        def _mps_ok() -> bool:
+            try:
+                import torch
+                return (
+                    getattr(torch.backends, "mps", None) is not None
+                    and torch.backends.mps.is_available()
+                )
+            except Exception:
+                return False
+
+        def _openvino_devices() -> set[str]:
+            """
+            Return the set of OpenVINO plugin names the runtime can
+            actually reach — 'CPU', 'GPU', 'NPU', etc. Empty set if
+            OpenVINO isn't installed in the image.
+            """
+            try:
+                import openvino as ov
+                return set(ov.Core().available_devices)
+            except Exception:
+                return set()
+
+        # ── Explicit Intel / OpenVINO preference ───────────────────────────
+        if preference.startswith("intel:"):
+            target = preference.split(":", 1)[1].upper()  # gpu → GPU
+            ov_devices = _openvino_devices()
+            if not ov_devices:
                 logger.warning(
-                    "ai.device=%s but openvino is not installed in this "
-                    "image — falling back to cpu. Rebuild with "
-                    "docker-compose.intel.yml to enable Intel acceleration.",
+                    "ai.device=%s but OpenVINO isn't available in this "
+                    "image — falling back to cpu.",
                     preference,
                 )
                 return "cpu"
-            return preference  # e.g. "intel:gpu"
+            if target not in ov_devices:
+                logger.warning(
+                    "ai.device=%s but OpenVINO can't reach %s (saw %s) — "
+                    "falling back to cpu. Usually a /dev/dri passthrough "
+                    "or render-group permissions issue.",
+                    preference, target, sorted(ov_devices),
+                )
+                return "cpu"
+            return preference
 
-        # ── PyTorch native path ────────────────────────────────────────────
-        try:
-            import torch
-        except ImportError:
-            return "cpu"
-
-        cuda_ok = torch.cuda.is_available()
-        mps_ok = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
-
-        if preference == "auto":
-            if cuda_ok:
-                return "cuda"
-            if mps_ok:
-                return "mps"
-            return "cpu"
-
+        # ── Explicit native torch preferences ──────────────────────────────
         if preference == "cuda":
-            return "cuda" if cuda_ok else "cpu"
+            return "cuda" if _cuda_ok() else "cpu"
         if preference == "mps":
-            return "mps" if mps_ok else "cpu"
+            return "mps" if _mps_ok() else "cpu"
+        if preference == "cpu":
+            return "cpu"
+
+        # ── Auto: probe everything, prefer the fastest reachable ───────────
+        if preference != "auto":
+            logger.warning("Unknown ai.device=%r, using auto", preference)
+
+        if _cuda_ok():
+            return "cuda"
+
+        ov_devices = _openvino_devices()
+        if "GPU" in ov_devices:
+            return "intel:gpu"
+        if "NPU" in ov_devices:
+            return "intel:npu"
+
+        if _mps_ok():
+            return "mps"
+
         return "cpu"
 
     def _load_model(self, model_path: str, device: str):

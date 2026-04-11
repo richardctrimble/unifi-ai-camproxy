@@ -1,12 +1,22 @@
 version: "3.8"
 
+# Default image: CPU + Intel OpenVINO (~1.5GB). Covers plain CPU hosts
+# and Intel iGPU/dGPU/NPU boxes — AIEngine auto-detects the fastest
+# reachable device on startup.
+#
+# For NVIDIA CUDA, layer docker-compose.gpu.yml on top (it swaps the
+# build to Dockerfile.cuda):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# For Intel iGPU/dGPU/NPU, layer docker-compose.intel.yml on top (it
+# keeps this same image and just passes through /dev/dri):
+#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+
 services:
   unifi-ai-port:
     build:
       context: .
-      args:
-        # Override via docker-compose.gpu.yml for CUDA builds.
-        TORCH_DEVICE: cpu
+      dockerfile: Dockerfile
     image: unifi-ai-port:latest
     container_name: unifi-ai-port
     restart: unless-stopped
@@ -15,7 +25,3 @@ services:
       - ./config:/config        # mount your config.yml here
     environment:
       - PYTHONUNBUFFERED=1
-
-# For GPU acceleration, layer docker-compose.gpu.yml on top:
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
-# That override sets TORCH_DEVICE=cu121 and reserves the nvidia device.

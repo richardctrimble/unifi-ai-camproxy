@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# GPU override — apply on top of docker-compose.yml:
+# NVIDIA CUDA override — apply on top of docker-compose.yml:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 #
@@ -7,12 +7,16 @@
 #   1. NVIDIA GPU with a recent driver (for CUDA 12.1 runtime compat)
 #   2. nvidia-container-toolkit installed (so Docker can see the GPU)
 #
-# What this changes vs the CPU default:
-#   - TORCH_DEVICE=cu121 → Dockerfile pulls the CUDA 12.1 PyTorch wheels
-#     instead of the CPU ones. Final image is ~2.5GB vs ~800MB.
+# What this changes vs the default image:
+#   - Swaps the build to Dockerfile.cuda, which installs the CUDA 12.1
+#     PyTorch wheel instead of the CPU+Intel stack. Final image ~2.5GB
+#     vs the default ~1.5GB (and Intel OpenVINO is NOT shipped in the
+#     CUDA image — if you need both, build a custom variant).
 #   - `deploy.resources.reservations.devices` reserves the GPU for the
 #     container. Without this, torch still imports but `cuda.is_available()`
-#     returns False.
+#     returns False and AIEngine falls back to cpu.
+#   - Tags the image as unifi-ai-port:cuda so it doesn't clobber the
+#     default unifi-ai-port:latest tag.
 #
 # Once running, check `docker compose logs -f` — AIEngine logs its chosen
 # device on startup ("Running inference on: cuda"). If you see "cpu" there,
@@ -22,8 +26,8 @@
 services:
   unifi-ai-port:
     build:
-      args:
-        TORCH_DEVICE: cu121
+      dockerfile: Dockerfile.cuda
+    image: unifi-ai-port:cuda
     deploy:
       resources:
         reservations:

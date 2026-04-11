@@ -74,40 +74,34 @@ a `mac:` manually if you want to pick your own.
 
 ## Acceleration
 
-By default the image ships CPU-only PyTorch — fine for most setups, up to
-~4-6 cameras on a modest x86 box with `yolov8n`. For hardware acceleration:
+The default image (`Dockerfile`, ~1.5GB) ships **CPU PyTorch + OpenVINO +
+the Intel compute runtime**, so on any CPU or Intel iGPU/dGPU/NPU host it
+just works — no rebuild, no config twiddling. On startup AIEngine probes
+every reachable runtime and picks the fastest one automatically:
 
-### NVIDIA GPU (CUDA)
-
-Requires an NVIDIA GPU on the host, a recent driver, and
-[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Then layer the GPU override on top of the base compose file:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+cuda → intel:gpu → intel:npu → mps → cpu
 ```
 
-The override swaps the CPU PyTorch wheels for CUDA 12.1 (`cu121`) and reserves
-the GPU for the container. Check `docker compose logs -f` on startup — the
-AIEngine logs `Running inference on: cuda` when the GPU is live, or `cpu` if
-something went wrong with the passthrough.
+Check `docker compose logs -f` for `Running inference on: …` to see which
+it picked. You can override the probe by setting `ai.device` in
+`config.yml` to any of those targets.
 
-You can also force the device via config (`ai.device: cuda`) — but it'll fall
-back to CPU if CUDA isn't actually available inside the container, so the
-build override is the real switch.
-
-### Intel iGPU / dGPU / NPU (OpenVINO)
+### Intel iGPU / dGPU / NPU (default image)
 
 For Intel N100-class mini PCs and similar — the chip in a £100 Beelink box
 can run YOLOv8n 2–3× faster on its integrated UHD graphics than on its
-own CPU cores, via Intel's OpenVINO runtime. Also works for Intel Arc
-discrete GPUs and Meteor/Arrow Lake NPUs.
+own CPU cores, via OpenVINO. Also works for Intel Arc discrete GPUs and
+Meteor/Arrow Lake NPUs.
+
+No separate image — layer `docker-compose.intel.yml` just to pass
+`/dev/dri` into the container:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
 ```
 
-Then in `config/config.yml` set `ai.device` to one of:
+Targets you can set in `ai.device` (or leave on `auto` and let it pick):
 
 | Value | Target | Notes |
 |---|---|---|
@@ -127,9 +121,27 @@ in the `render` group so the container can reach `/dev/dri/renderD128`:
 sudo usermod -aG render $USER && newgrp render
 ```
 
-Confirm it worked by checking `docker compose logs -f` for
-`Running inference on: intel:gpu` on startup. `falling back to cpu` means
-the GPU wasn't reachable (usually a permissions issue on `/dev/dri`).
+### NVIDIA GPU (CUDA variant image)
+
+NVIDIA CUDA lives in a separate image (`Dockerfile.cuda`, ~2.5GB) so CPU
+and Intel users don't pay the CUDA wheel overhead they'd never use.
+Requires an NVIDIA GPU, a recent driver, and
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Layer the GPU override on top of the base compose file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+The override tells Compose to build from `Dockerfile.cuda` (CUDA 12.1
+PyTorch wheel) and reserves the GPU for the container. Check
+`docker compose logs -f` — AIEngine logs `Running inference on: cuda`
+when the GPU is live, or `cpu` if something went wrong with the
+passthrough.
+
+The CUDA variant image does NOT include OpenVINO / Intel runtime — if
+you somehow have a host with both an NVIDIA dGPU and an Intel iGPU and
+want to use both, build a custom merged image.
 
 ## Virtual line crossing
 

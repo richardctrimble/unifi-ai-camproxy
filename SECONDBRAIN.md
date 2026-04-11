@@ -113,8 +113,11 @@ Each needs a unique fake MAC address.
 
 ```
 happy-ai-port/
-├── Dockerfile                  # Two-stage: clones unifi-cam-proxy, builds final image
-├── docker-compose.yml          # network_mode: host (required), volume: ./config:/config
+├── Dockerfile                  # Default: CPU torch + OpenVINO + Intel runtime (~1.5GB)
+├── Dockerfile.cuda             # NVIDIA variant: CUDA 12.1 PyTorch wheel (~2.5GB)
+├── docker-compose.yml          # Builds default Dockerfile; host network + /config mount
+├── docker-compose.gpu.yml      # Override → switches build to Dockerfile.cuda + nvidia device
+├── docker-compose.intel.yml    # Override → passes /dev/dri into default image (no rebuild)
 ├── requirements.txt            # ultralytics, opencv-python-headless, pyyaml, aiohttp, websockets...
 ├── README.md                   # Setup instructions
 ├── SECONDBRAIN.md              # ← this file
@@ -281,8 +284,10 @@ cameras:
 - [x] Line crossing actually plumbed through the tracker (was instantiated-but-dead in the first version)
 - [x] Embedded web tool at port 8091 for drawing lines on live frames, iPad-friendly
 - [x] Per-class confidence thresholds (person vs vehicle) — shared `confidence` is still the fallback
-- [x] Device auto-detection (cuda > mps > cpu) with explicit logging; NVIDIA CUDA support via `docker-compose.gpu.yml` override that swaps in the CUDA PyTorch wheels and reserves the GPU
-- [x] Intel iGPU / dGPU / NPU support via OpenVINO and `docker-compose.intel.yml` override. Auto-exports YOLOv8 to OpenVINO IR format on first run, caches the exported model under `/config/<model>_openvino_model/`. Targets the N100 hardware recommendation specifically — 2–3× CPU throughput on the integrated UHD graphics.
+- [x] Universal device auto-detection (`ai.device: auto`) — probes every runtime that's reachable and picks the fastest in order: `cuda → intel:gpu → intel:npu → mps → cpu`. Logs the winner on startup.
+- [x] Split image strategy: default `Dockerfile` (~1.5GB) ships CPU torch + OpenVINO + Intel compute runtime — covers CPU and Intel iGPU/dGPU/NPU hosts in a single build. Sibling `Dockerfile.cuda` (~2.5GB) swaps in the CUDA 12.1 PyTorch wheel for NVIDIA hosts. Split keeps each image targeted instead of shipping 3.5GB of runtimes nobody uses.
+- [x] `docker-compose.intel.yml` just passes through `/dev/dri` — no rebuild needed, the default image already has OpenVINO. Auto-exports YOLOv8 to OpenVINO IR format on first run and caches under `/config/<model>_openvino_model/`. Targets N100 hardware recommendation — 2–3× CPU throughput on integrated UHD.
+- [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-port:cuda` so it doesn't collide with the default tag.
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
 
 ---
@@ -326,8 +331,8 @@ cameras:
 
 For running this container:
 - **Minimum:** Any x86 machine with 2GB RAM free (Raspberry Pi 5 also works but needs ARM build)
-- **Recommended:** Intel N100 mini PC (~£100–150) — silent, low power, handles 4–6 cameras at yolov8n
-- **GPU:** If you have an NVIDIA GPU, uncomment the GPU section in docker-compose.yml — YOLO will use CUDA automatically
+- **Recommended:** Intel N100 mini PC (~£100–150) — silent, low power, default image ships OpenVINO so the iGPU lights up automatically (2–3× CPU throughput). Handles 4–6 cameras at yolov8n easily.
+- **NVIDIA GPU:** Build the CUDA variant via `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` — AIEngine auto-detects and prefers CUDA when available.
 
 YOLO model sizing:
 | Model | Speed | RAM | Use when |

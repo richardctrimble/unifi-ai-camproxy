@@ -1,7 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Intel iGPU / dGPU / NPU override — apply on top of docker-compose.yml:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#
+# Note: no --build needed — the default image already ships OpenVINO +
+# the Intel compute runtime. This override just passes through /dev/dri
+# so OpenVINO can actually reach the GPU / NPU.
 #
 # What this targets:
 #   - Intel N100 / N305 mini PCs (the recommended hardware in SECONDBRAIN)
@@ -17,30 +21,28 @@
 #      the container can open /dev/dri/renderD128. `sudo usermod -aG render $USER`
 #      followed by a re-login usually sorts this.
 #
-# What this changes vs the CPU default:
-#   - TORCH_DEVICE=intel → Dockerfile adds OpenVINO + intel-opencl-icd +
-#     libze1 on top of the CPU PyTorch wheel. Image grows ~700MB.
+# What this changes vs plain `docker compose up`:
 #   - /dev/dri is bind-mounted into the container so OpenVINO can reach
 #     the iGPU / dGPU via Level Zero.
 #   - group_add: video + render so the container process has permission
 #     to open the DRI device nodes.
 #
-# Once running, check `docker compose logs -f`:
-#   - "Exporting yolov8n.pt to OpenVINO IR (one-time, ~30s)" on first build
-#   - "Running inference on: intel:gpu" on every start after
-#   - If you see "falling back to cpu" instead, OpenVINO couldn't reach
-#     the GPU — usually a permissions issue on /dev/dri.
-#
-# You still need to set the device in config.yml:
+# AIEngine auto-detects OpenVINO targets when ai.device=auto — once
+# /dev/dri is visible inside the container, the probe will prefer
+# intel:gpu (or intel:npu on Meteor/Arrow Lake) over cpu automatically.
+# You can still pin a specific target in config.yml:
 #   ai:
 #     device: "intel:gpu"   # or intel:cpu / intel:npu
+#
+# Once running, check `docker compose logs -f`:
+#   - "Exporting yolov8n.pt to OpenVINO IR (one-time, ~30s)" on first start
+#   - "Running inference on: intel:gpu" on every start after
+#   - If you see "cpu" instead, OpenVINO couldn't reach the GPU —
+#     usually a permissions issue on /dev/dri.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
   unifi-ai-port:
-    build:
-      args:
-        TORCH_DEVICE: intel
     devices:
       - /dev/dri:/dev/dri
     group_add:
