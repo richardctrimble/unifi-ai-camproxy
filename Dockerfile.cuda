@@ -1,3 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# NVIDIA CUDA variant image.
+#
+# Built via docker-compose.gpu.yml, which points Compose at this Dockerfile
+# instead of the default one. Use it when you have an NVIDIA GPU + the
+# nvidia-container-toolkit installed — AIEngine will auto-detect CUDA and
+# route inference through it.
+#
+# Why a separate file instead of a conditional ARG?
+#   The CUDA 12.1 PyTorch wheel bundles the CUDA runtime libraries and is
+#   ~2GB larger than the CPU wheel. Shipping that in every image would
+#   bloat the CPU / Intel users' pull for no benefit. Splitting keeps each
+#   image targeted:
+#
+#       Dockerfile        → CPU + Intel OpenVINO  (~1.5GB)
+#       Dockerfile.cuda   → NVIDIA CUDA torch     (~2.5GB)
+#
+# Final image size: ~2.5GB.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Stage 1: build unifi-cam-proxy (for its protocol layer) ──────────────────
 FROM python:3.11-slim AS proxy-builder
 
@@ -9,7 +29,7 @@ RUN git clone --depth=1 https://github.com/keshavdv/unifi-cam-proxy.git
 FROM python:3.11-slim
 
 LABEL maintainer="unifi-ai-port"
-LABEL description="DIY UniFi AI Port — person/vehicle detection + line crossing"
+LABEL description="DIY UniFi AI Port — CUDA variant"
 
 # System deps: ffmpeg for video streaming, openssl for cert gen, libGL for OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,36 +47,12 @@ WORKDIR /app
 COPY --from=proxy-builder /build/unifi-cam-proxy /app/unifi-cam-proxy
 RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
 
-# ── Default runtime image (CPU + Intel OpenVINO) ─────────────────────────────
-# This image ships CPU PyTorch + OpenVINO + the Intel compute runtime, so
-# at startup AIEngine auto-probes and picks the fastest reachable device
-# in this order: intel:gpu → intel:npu → mps → cpu.
-#
-# For NVIDIA CUDA, build the sibling Dockerfile.cuda instead (via
-# docker-compose.gpu.yml) — we keep CUDA in its own image so CPU/Intel
-# users don't pay the ~2GB CUDA wheel cost they'd never use.
-#
-# Final image size: ~1.5GB.
-#
-# What's layered in:
-#   1. CPU PyTorch wheel — small (~800MB), enough for the native backend
-#      and to satisfy ultralytics' import.
-#   2. OpenVINO runtime (pip) — Intel's inference engine. Sees 'CPU' by
-#      default and picks up 'GPU' / 'NPU' once /dev/dri is passed through
-#      via docker-compose.intel.yml.
-#   3. Intel compute runtime (intel-opencl-icd + libze1) — the userspace
-#      half of the Intel GPU driver stack. Harmless on non-Intel hosts;
-#      required so OpenVINO can reach the iGPU via Level Zero.
+# CUDA 12.1 PyTorch wheel. `cu118` also works for older NVIDIA drivers;
+# override with --build-arg CUDA_FLAVOR=cu118.
+ARG CUDA_FLAVOR=cu121
 RUN pip install --no-cache-dir \
-      --index-url https://download.pytorch.org/whl/cpu \
+      --index-url https://download.pytorch.org/whl/${CUDA_FLAVOR} \
       torch torchvision
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        intel-opencl-icd \
-        libze1 \
-        ocl-icd-libopencl1 \
-     && rm -rf /var/lib/apt/lists/* \
-     && pip install --no-cache-dir "openvino>=2024.0.0"
 
 # Python deps for our AI stack (ultralytics will see torch is already
 # present and not re-install a different flavour over the top).
@@ -73,7 +69,6 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 VOLUME ["/config"]
 
 # Embedded line-drawing web UI (served when web_tool.enabled in config.yml).
-# With network_mode: host the port is reachable directly; EXPOSE is for docs.
 EXPOSE 8091
 
 WORKDIR /app/src

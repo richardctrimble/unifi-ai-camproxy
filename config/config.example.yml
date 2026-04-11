@@ -1,21 +1,77 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # unifi-ai-port configuration
+#
+# The only things you *have* to fill in are:
+#   * unifi.host
+#   * unifi.username + unifi.password  (local Protect account)
+#   * each camera's name + rtsp_url
+#
+# Everything else — adoption token, fake MAC address, local IP, and even
+# accepting the camera in the Protect UI — is handled automatically, all
+# against your local UniFi controller. No external services are contacted.
 # ─────────────────────────────────────────────────────────────────────────────
 
 unifi:
   host: 192.168.1.1          # IP of your UniFi Dream Machine / UNVR
-  token: "PASTE_TOKEN_HERE"  # From Protect → Cameras → QR code (see README)
+
+  # ── Option A (recommended): auto-fetch token + auto-accept adoption ──
+  username: "your-protect-username"
+  password: "your-protect-password"
+
+  # ── Option B: paste the token manually instead ──
+  # (Get it from https://<host>/proxy/protect/api/cameras/qr and decode
+  # the QR code. Leave username/password unset if you use this.)
+  # token: "PASTE_TOKEN_HERE"
+
+# Optional — embedded web UI for drawing virtual lines on live camera
+# frames. Open http://<docker-host>:8091/ in any browser to use it.
+# Disable by setting enabled: false.
+web_tool:
+  enabled: true
+  port: 8091
 
 cameras:
   - name: "Front Door"
-    mac: "AA:BB:CC:11:22:33"   # Fake MAC — must be unique, not used by real device
-    ip: "192.168.1.101"        # IP to report to Protect (can be this machine's IP)
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
     snapshot_url: "http://192.168.1.50/snapshot.jpg"   # optional
 
+    # Optional — auto-generated from the camera name if omitted.
+    # mac: "AA:BB:CC:11:22:33"
+    # ip:  "192.168.1.101"
+
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
+
+      # Inference device. "auto" is the right answer for almost
+      # everyone — it probes what's reachable and picks the fastest:
+      #   cuda → intel:gpu → intel:npu → mps → cpu
+      #
+      # Force a specific target here if you want to override the probe:
+      #   cpu        — force CPU
+      #   cuda       — NVIDIA GPU (needs Dockerfile.cuda image — build
+      #                via docker-compose.gpu.yml)
+      #   mps        — Apple Silicon (bare-metal, not inside Docker)
+      #   intel:gpu  — Intel integrated / discrete GPU via OpenVINO
+      #                (default image ships OpenVINO; add
+      #                docker-compose.intel.yml for /dev/dri passthrough)
+      #   intel:cpu  — OpenVINO on Intel CPU (often faster than native
+      #                PyTorch CPU, especially for N100-class chips)
+      #   intel:npu  — Meteor Lake / Arrow Lake NPU via OpenVINO
+      #
+      # Note: the default image carries CPU torch + OpenVINO, so
+      # intel:* works out of the box once /dev/dri is exposed. For
+      # NVIDIA CUDA you need the separate Dockerfile.cuda image.
+      device: "auto"
+
+      # Confidence thresholds.
+      #   `confidence` is the fallback — used if you don't set a
+      #   per-class override below.
+      #   Vehicles usually want a stricter threshold than people
+      #   because YOLO flips between car/truck/bus around ~0.5.
       confidence: 0.50
+      confidence_person: 0.45
+      confidence_vehicle: 0.60
+
       detect_persons: true
       detect_vehicles: true
       frame_skip: 3            # analyse every 3rd frame (lower = more CPU)
@@ -28,12 +84,11 @@ cameras:
           y1: 0.0
           x2: 0.5
           y2: 1.0
-          direction: "both"    # left_to_right | right_to_left | both
+          # both | left_to_right | right_to_left | top_to_bottom | bottom_to_top
+          direction: "both"
 
-  # Add more cameras:
+  # Add more cameras — mac/ip will be auto-generated:
   # - name: "Backyard"
-  #   mac: "AA:BB:CC:11:22:44"
-  #   ip: "192.168.1.102"
   #   rtsp_url: "rtsp://..."
   #   ai:
   #     confidence: 0.45

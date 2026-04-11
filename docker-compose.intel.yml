@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Intel iGPU / dGPU / NPU override — apply on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#
+# Note: no --build needed — the default image already ships OpenVINO +
+# the Intel compute runtime. This override just passes through /dev/dri
+# so OpenVINO can actually reach the GPU / NPU.
+#
+# What this targets:
+#   - Intel N100 / N305 mini PCs (the recommended hardware in SECONDBRAIN)
+#   - Any Intel CPU with integrated UHD / Iris Xe graphics
+#   - Intel Arc A-series discrete GPUs
+#   - Meteor Lake / Arrow Lake NPUs (via intel:npu)
+#
+# Requirements on the host:
+#   1. A working Intel GPU driver — on modern Linux this is in-kernel
+#      (i915 for Gen9+, xe for newer). Nothing extra to install for most
+#      distros. Check with `ls /dev/dri` — you should see card0 + renderD128.
+#   2. Your user (or the docker daemon) must be in the `render` group so
+#      the container can open /dev/dri/renderD128. `sudo usermod -aG render $USER`
+#      followed by a re-login usually sorts this.
+#
+# What this changes vs plain `docker compose up`:
+#   - /dev/dri is bind-mounted into the container so OpenVINO can reach
+#     the iGPU / dGPU via Level Zero.
+#   - group_add: video + render so the container process has permission
+#     to open the DRI device nodes.
+#
+# AIEngine auto-detects OpenVINO targets when ai.device=auto — once
+# /dev/dri is visible inside the container, the probe will prefer
+# intel:gpu (or intel:npu on Meteor/Arrow Lake) over cpu automatically.
+# You can still pin a specific target in config.yml:
+#   ai:
+#     device: "intel:gpu"   # or intel:cpu / intel:npu
+#
+# Once running, check `docker compose logs -f`:
+#   - "Exporting yolov8n.pt to OpenVINO IR (one-time, ~30s)" on first start
+#   - "Running inference on: intel:gpu" on every start after
+#   - If you see "cpu" instead, OpenVINO couldn't reach the GPU —
+#     usually a permissions issue on /dev/dri.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  unifi-ai-port:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render

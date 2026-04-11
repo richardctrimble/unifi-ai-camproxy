@@ -2,12 +2,27 @@
 LineCrossingDetector — checks if a tracked object's centroid
 has crossed a user-defined virtual line between frames.
 
-Lines are defined in config as normalised 0-1 coordinates:
+Lines are defined in config as normalised 0-1 coordinates in
+screen space — (0, 0) is the top-left corner, (1, 1) is
+bottom-right:
+
   lines:
     - name: "EntryLine"
       x1: 0.5  y1: 0.0
       x2: 0.5  y2: 1.0
-      direction: "both"   # left_to_right | right_to_left | both
+      direction: "both"
+      # direction options:
+      #   both           — any crossing
+      #   left_to_right  — object's centroid moved in +x
+      #   right_to_left  — object's centroid moved in -x
+      #   top_to_bottom  — object's centroid moved in +y (down the screen)
+      #   bottom_to_top  — object's centroid moved in -y (up the screen)
+
+Direction is derived from the motion vector of the centroid between
+the two frames, which makes it independent of the order in which the
+user drew the line endpoints. This matches the natural mental model
+("an object walking left-to-right across this line") rather than
+leaking the line's internal orientation into the filter.
 """
 
 import logging
@@ -42,8 +57,8 @@ class VirtualLine:
 
     def check_crossing(self, prev_centroid, curr_centroid) -> Optional[str]:
         """
-        Returns the line name if centroid path crosses this line,
-        else None. Respects direction filter.
+        Returns the line name if the centroid path crosses this line
+        AND the motion direction matches the configured filter.
         """
         if not _segments_intersect(prev_centroid, curr_centroid, self.p1, self.p2):
             return None
@@ -51,11 +66,16 @@ class VirtualLine:
         if self.direction == "both":
             return self.name
 
-        # Determine direction of crossing using cross product sign
-        cross = _cross_product(self.p1, self.p2, curr_centroid)
-        if self.direction == "left_to_right" and cross > 0:
+        dx = curr_centroid[0] - prev_centroid[0]
+        dy = curr_centroid[1] - prev_centroid[1]
+
+        if self.direction == "left_to_right" and dx > 0:
             return self.name
-        if self.direction == "right_to_left" and cross < 0:
+        if self.direction == "right_to_left" and dx < 0:
+            return self.name
+        if self.direction == "top_to_bottom" and dy > 0:
+            return self.name
+        if self.direction == "bottom_to_top" and dy < 0:
             return self.name
 
         return None
