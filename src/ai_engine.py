@@ -20,6 +20,8 @@ import numpy as np
 # Ultralytics YOLOv8 — CPU-friendly on x86, GPU if available
 from ultralytics import YOLO
 
+from line_crossing import LineCrossingDetector
+
 
 # YOLO class IDs we care about
 PERSON_CLASS = 0
@@ -77,6 +79,13 @@ class AIEngine:
         self._next_id = 0
         self._detection_queue: asyncio.Queue = asyncio.Queue()
 
+        # Virtual line crossing — lives here so we can check per-frame
+        # against the freshly-updated centroid pair on each tracked object.
+        lines_config = config.get("lines", []) or []
+        self.line_detector = LineCrossingDetector(
+            lines_config, logger=logger.getChild("lc")
+        )
+
     # ─── Public API ─────────────────────────────────────────────────────────
 
     async def detections(self) -> AsyncGenerator[dict, None]:
@@ -100,6 +109,10 @@ class AIEngine:
 
     async def get_snapshot(self) -> Optional[Path]:
         return self._snapshot_path
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """Read-only accessor used by the web line-tool UI."""
+        return self._latest_frame
 
     async def stop(self):
         self._stopped = True
@@ -180,6 +193,24 @@ class AIEngine:
                 obj = self._tracked[best_id]
                 obj.update(bbox, conf)
                 matched_ids.add(best_id)
+
+                # Check virtual line crossings against the freshly
+                # updated centroid pair. A crossing emits a discrete
+                # "start" event that Protect surfaces in the timeline.
+                if self.line_detector.lines:
+                    crossed = self.line_detector.check(
+                        obj.prev_centroid, obj.centroid
+                    )
+                    if crossed:
+                        snap = self._save_snapshot(frame)
+                        self._emit(
+                            "start",
+                            obj.obj_type,
+                            bbox,
+                            conf,
+                            snapshot_path=snap,
+                            line_crossing=crossed,
+                        )
             else:
                 # New object
                 obj_id = str(self._next_id)

@@ -74,9 +74,29 @@ a `mac:` manually if you want to pick your own.
 
 ## Virtual line crossing
 
-Lines are defined per-camera as two points in normalised (0–1) coordinates.
-When a tracked object's path crosses the line, the detection is tagged and
-triggers a Protect smart detection event.
+Lines are defined per-camera as two points in normalised (0–1) coordinates
+where `(0, 0)` is the top-left of the frame and `(1, 1)` the bottom-right.
+When a tracked object's centroid crosses the line segment, a discrete
+smart-detection event is injected into Protect's timeline.
+
+### Drawing a line visually
+
+Don't try to eyeball coordinates — the container ships an embedded line
+tool. Once `docker compose up` is running, open:
+
+```
+http://<docker-host-ip>:8091/
+```
+
+in any browser (phone / iPad works fine). Pick a camera from the dropdown,
+click two points on the live frame, tweak the name and direction, then
+copy the generated YAML into your `config/config.yml` under that camera's
+`ai.lines:` block and `docker compose restart` to apply.
+
+Existing lines are rendered as dashed grey overlays so you can see what
+you've already got.
+
+Disable the tool by setting `web_tool.enabled: false` in config.yml.
 
 ## Known limitations
 

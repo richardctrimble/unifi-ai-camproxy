@@ -125,8 +125,9 @@ happy-ai-port/
     ├── main.py                 # Entry point — loads config, orchestrates auto-adoption
     ├── unifi_auth.py           # Local Protect API client (token fetch + accept adoption)
     ├── auto_config.py          # Deterministic fake-MAC + local-IP detection
+    ├── web_tool.py             # aiohttp server + embedded HTML line-drawing UI
     ├── unifi_client.py         # AIPortCamera — extends UnifiCamBase, bridges AI → Protect
-    ├── ai_engine.py            # YOLOv8 inference, IoU tracker, async detection generator
+    ├── ai_engine.py            # YOLOv8 inference, IoU tracker, line crossing, async detection generator
     ├── line_crossing.py        # VirtualLine + LineCrossingDetector
     └── cert_gen.py             # Auto-generates self-signed TLS cert if not present
 ```
@@ -160,6 +161,25 @@ happy-ai-port/
   fake MAC shows up in pending-adopt state, then PATCHes
   `{name, isAdopting: false, isAdopted: true}` to `/cameras/<id>`.
 
+### web_tool.py — embedded line-drawing UI
+- Single-file aiohttp server running in-process alongside the camera
+  workers. `LineTool(registry, config).run(port=8091)` is spawned as
+  another asyncio task from `main.py`.
+- `GET /` → serves `INDEX_HTML` (inline single-page tool, no external
+  assets, works on iPad Safari / any mobile browser).
+- `GET /api/cameras` → list of configured camera names.
+- `GET /api/frame/<name>` → JPEG encoded from `AIEngine.get_latest_frame()`
+  via `cv2.imencode`.
+- `GET /api/lines/<name>` → existing lines from `config.yml` so the UI
+  can draw them as dashed grey overlays for reference.
+- UI flow: pick camera → click two points on live frame → tweak name
+  and direction → copy YAML → paste under that camera's `ai.lines:`.
+  Coordinates are stored as normalised 0-1 from the click's
+  `getBoundingClientRect` fraction, which matches exactly what
+  `LineCrossingDetector` expects.
+- Read-only — never writes back to `config.yml` (safer, avoids
+  clobbering user formatting).
+
 ### auto_config.py — zero-config helpers
 - `generate_mac(name)` — MD5 of the name, first byte masked to set the
   locally-administered bit (`0x02`) and clear the multicast bit. Same name →
@@ -180,8 +200,10 @@ happy-ai-port/
 - `detections()` — async generator, runs blocking OpenCV+YOLO in thread executor
 - `_capture_loop()` — blocking, runs in executor. Reconnects on stream loss with exponential backoff
 - `_run_inference()` — YOLO on every Nth frame (frame_skip), normalises bbox to 0-1
-- `_update_tracker()` — IoU matching, emits "start" on new object, "stop" after DEBOUNCE_STOP_FRAMES (10) missing frames
+- `_update_tracker()` — IoU matching, emits "start" on new object, "stop" after DEBOUNCE_STOP_FRAMES (10) missing frames. After every successful match it also runs `self.line_detector.check(prev_centroid, curr_centroid)` and emits an additional discrete "start" event with `line_crossing=<name>` when the centroid pair intersects a configured line.
+- `get_latest_frame()` — thread-racy but atomic read for the web tool
 - YOLO classes: PERSON=0, VEHICLES={2,3,5,7} (car, motorcycle, bus, truck)
+- `LineCrossingDetector` now lives in `AIEngine` (not `AIPortCamera`) so the per-frame centroid check happens at the point where we actually have both `prev_centroid` and `curr_centroid`.
 
 ### line_crossing.py — LineCrossingDetector
 - Lines defined as two normalised points (0-1 coordinate space)
@@ -256,6 +278,8 @@ cameras:
 - [x] Deterministic fake-MAC generation (no duplicate pending cameras on restart)
 - [x] Auto local-IP detection
 - [x] Auto accept of pending adoption via Protect API (no UI click-through)
+- [x] Line crossing actually plumbed through the tracker (was instantiated-but-dead in the first version)
+- [x] Embedded web tool at port 8091 for drawing lines on live frames, iPad-friendly
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
 
 ---

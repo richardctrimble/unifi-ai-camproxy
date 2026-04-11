@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from typing import Dict
 
 import yaml
 
@@ -8,7 +9,13 @@ from auto_config import detect_local_ip, generate_mac
 from cert_gen import ensure_cert
 from unifi_auth import UniFiAuthError, UniFiProtectClient
 from unifi_client import AIPortCamera
+from web_tool import LineTool
 from unifi.core import Core
+
+# Shared registry of live camera objects, keyed by camera name. Populated
+# by run_camera() as each AIPortCamera is constructed, consumed by the
+# web tool so it can pull latest frames from each camera's AIEngine.
+camera_registry: Dict[str, AIPortCamera] = {}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,6 +141,10 @@ async def run_camera(cam_cfg: dict, global_cfg: dict, token: str):
         ai_config=cam_cfg.get("ai", {}),
     )
 
+    # Register before core.run() so the web tool can reach the AIEngine
+    # as soon as the capture loop has its first frame.
+    camera_registry[cam_cfg["name"]] = camera
+
     core = Core(args, camera, logging.getLogger(f"core.{cam_cfg['name']}"))
     logger.info("Starting camera: %s (%s)", cam_cfg["name"], cam_cfg["mac"])
     await core.run()
@@ -166,6 +177,14 @@ async def main():
     # 3. Start all camera workers + the background auto-adopt task
     tasks = [asyncio.create_task(run_camera(cam, cfg, token)) for cam in cameras]
     tasks.append(asyncio.create_task(auto_adopt_pending(cfg, cameras)))
+
+    # 4. Optional web UI for drawing virtual lines on live frames
+    web_cfg = cfg.get("web_tool", {}) or {}
+    if web_cfg.get("enabled", True):
+        port = int(web_cfg.get("port", 8091))
+        tool = LineTool(camera_registry, cfg)
+        logger.info("Starting line tool UI on port %d", port)
+        tasks.append(asyncio.create_task(tool.run(port)))
 
     await asyncio.gather(*tasks, return_exceptions=False)
 

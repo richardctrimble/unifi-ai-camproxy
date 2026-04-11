@@ -23,6 +23,13 @@ unifi:
   # the QR code. Leave username/password unset if you use this.)
   # token: "PASTE_TOKEN_HERE"
 
+# Optional — embedded web UI for drawing virtual lines on live camera
+# frames. Open http://<docker-host>:8091/ in any browser to use it.
+# Disable by setting enabled: false.
+web_tool:
+  enabled: true
+  port: 8091
+
 cameras:
   - name: "Front Door"
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
@@ -47,7 +54,8 @@ cameras:
           y1: 0.0
           x2: 0.5
           y2: 1.0
-          direction: "both"    # left_to_right | right_to_left | both
+          # both | left_to_right | right_to_left | top_to_bottom | bottom_to_top
+          direction: "both"
 
   # Add more cameras — mac/ip will be auto-generated:
   # - name: "Backyard"

@@ -24,7 +24,6 @@ sys.path.insert(0, "/app/unifi-cam-proxy")
 from unifi.cams.base import UnifiCamBase, SmartDetectObjectType
 
 from ai_engine import AIEngine
-from line_crossing import LineCrossingDetector
 
 
 class AIPortCamera(UnifiCamBase):
@@ -47,10 +46,6 @@ class AIPortCamera(UnifiCamBase):
             config=ai_config,
             logger=logger.getChild("ai"),
         )
-
-        # Line crossing detector (optional)
-        lines = ai_config.get("lines", [])
-        self.line_detector = LineCrossingDetector(lines, logger=logger.getChild("lc"))
 
         self._snapshot_path: Optional[Path] = None
         self._ai_task: Optional[asyncio.Task] = None

@@ -40,6 +40,10 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 # Config volume
 VOLUME ["/config"]
 
+# Embedded line-drawing web UI (served when web_tool.enabled in config.yml).
+# With network_mode: host the port is reachable directly; EXPOSE is for docs.
+EXPOSE 8091
+
 WORKDIR /app/src
 
 CMD ["python", "main.py", "/config/config.yml"]
