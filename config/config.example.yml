@@ -1,17 +1,36 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # unifi-ai-port configuration
+#
+# The only things you *have* to fill in are:
+#   * unifi.host
+#   * unifi.username + unifi.password  (local Protect account)
+#   * each camera's name + rtsp_url
+#
+# Everything else — adoption token, fake MAC address, local IP, and even
+# accepting the camera in the Protect UI — is handled automatically, all
+# against your local UniFi controller. No external services are contacted.
 # ─────────────────────────────────────────────────────────────────────────────
 
 unifi:
   host: 192.168.1.1          # IP of your UniFi Dream Machine / UNVR
-  token: "PASTE_TOKEN_HERE"  # From Protect → Cameras → QR code (see README)
+
+  # ── Option A (recommended): auto-fetch token + auto-accept adoption ──
+  username: "your-protect-username"
+  password: "your-protect-password"
+
+  # ── Option B: paste the token manually instead ──
+  # (Get it from https://<host>/proxy/protect/api/cameras/qr and decode
+  # the QR code. Leave username/password unset if you use this.)
+  # token: "PASTE_TOKEN_HERE"
 
 cameras:
   - name: "Front Door"
-    mac: "AA:BB:CC:11:22:33"   # Fake MAC — must be unique, not used by real device
-    ip: "192.168.1.101"        # IP to report to Protect (can be this machine's IP)
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
     snapshot_url: "http://192.168.1.50/snapshot.jpg"   # optional
+
+    # Optional — auto-generated from the camera name if omitted.
+    # mac: "AA:BB:CC:11:22:33"
+    # ip:  "192.168.1.101"
 
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
@@ -30,10 +49,8 @@ cameras:
           y2: 1.0
           direction: "both"    # left_to_right | right_to_left | both
 
-  # Add more cameras:
+  # Add more cameras — mac/ip will be auto-generated:
   # - name: "Backyard"
-  #   mac: "AA:BB:CC:11:22:44"
-  #   ip: "192.168.1.102"
   #   rtsp_url: "rtsp://..."
   #   ai:
   #     confidence: 0.45

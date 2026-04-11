@@ -16,33 +16,53 @@ thumbnails, timeline events).
 
 ## Quick start
 
-### 1. Get your adoption token
+Adoption is automated end-to-end. You only need to tell it **where** Protect
+is, **who** you are, and **what RTSP URL** to watch. Everything else — the
+adoption token, fake MAC addresses, the host IP, and even clicking "adopt" in
+the Protect UI — is handled for you, locally, against your own UniFi
+controller. No external services are contacted.
 
-In UniFi Protect:
-- Go to **Settings → Integrations** (or open `https://<unifi>/proxy/protect/api/cameras/qr`)
-- Decode the QR code — copy the adoption token string
+### 1. Configure
 
-### 2. Configure
+Copy `config/config.example.yml` to `config/config.yml` and fill in:
 
-Edit `config/config.yml`:
-- Set your UniFi host IP and token
-- Add your RTSP cameras with unique MAC addresses
-- Define virtual lines if needed
+```yaml
+unifi:
+  host: 192.168.1.1          # your UDM / UNVR
+  username: "your-protect-username"
+  password: "your-protect-password"
 
-### 3. Run
+cameras:
+  - name: "Front Door"
+    rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
+```
+
+That's it — `mac`, `ip`, and `token` are all optional. If you'd rather paste
+the adoption token manually instead of using credentials, see the commented
+section in `config.example.yml`.
+
+### 2. Run
 
 ```bash
 docker compose up -d
 ```
 
-On first run it downloads the YOLOv8n model (~6MB). Then watch Protect —
-your cameras should appear as pending adoption within ~30 seconds.
+On first run it downloads the YOLOv8n model (~6MB). The container will:
+
+1. Log in to your UniFi controller and pull a fresh adoption token
+2. Generate a stable fake MAC for each camera (derived from its name)
+3. Register each camera with Protect
+4. Auto-accept the pending adoption in Protect so you don't have to click through
+
+Watch `docker compose logs -f` — you should see "Auto-adopted camera …"
+messages within a minute.
 
 ## Multi-camera
 
 Each entry under `cameras:` becomes an independent virtual device in Protect.
-Each needs a **unique MAC address** (these are fake — just pick random ones
-that don't clash with real devices on your network).
+Fake MAC addresses are auto-generated from each camera's name (deterministic,
+so restarts don't create duplicate "pending" entries). You can still specify
+a `mac:` manually if you want to pick your own.
 
 ## Model options
 
