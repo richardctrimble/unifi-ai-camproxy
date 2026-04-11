@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  unifi-ai-port:
+    build: .
+    image: unifi-ai-port:latest
+    container_name: unifi-ai-port
+    restart: unless-stopped
+    network_mode: host          # needs host network to reach Protect & cameras
+    volumes:
+      - ./config:/config        # mount your config.yml here
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Uncomment for GPU support (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
