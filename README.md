@@ -291,9 +291,12 @@ thresholds, detection classes, and virtual lines. See
 
 ## TrueNAS Scale app
 
-The repo includes a TrueNAS Scale custom app catalog under `truenas/`.
-TrueNAS 24.10+ (Electric Eel) runs apps as Docker Compose stacks, so
-this works natively.
+TrueNAS Scale 24.10+ (Electric Eel) replaced the old Kubernetes/Helm
+app system with native Docker Compose. Custom app catalogs are no
+longer supported — instead you deploy custom apps by pasting a Docker
+Compose YAML directly in the TrueNAS UI.
+
+A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
 
 ### Prerequisites
 
@@ -302,38 +305,56 @@ this works natively.
   under your pool)
 - Your UniFi Protect controller IP and a local account (username + password)
 
-### Step 1 — Add the catalog
+### Step 1 — Install via YAML
 
 1. Open the TrueNAS web UI
 2. Go to **Apps** in the left sidebar
-3. Click **Discover Apps** at the top right
-4. Click the **Manage Catalogs** button (gear icon, top right)
-5. Click **Add Catalog**
-6. Fill in the form:
-   - **Catalog Name:** `happy-ai-port` (or any name you like)
-   - **Repository:** `https://github.com/richardctrimble/happy-ai-port.git`
-   - **Preferred Trains:** `charts`
-   - **Branch:** `main`
-7. Click **Save** — TrueNAS will pull the repo and index the catalog
-   (this may take a minute)
+3. Click **Discover Apps**
+4. Click **Custom App**
+5. Click **Install via YAML**
+6. Paste the contents of `truenas/docker-compose.yaml` into the editor
+   (or copy it from below)
+7. Edit the four `CHANGE ME` values:
+   - **Volume path** — your TrueNAS dataset (e.g. `/mnt/pool/apps/unifi-ai-port`)
+   - **UNIFI_HOST** — IP of your UDM / UDM Pro / UNVR
+   - **UNIFI_USERNAME** — local Protect account username
+   - **UNIFI_PASSWORD** — local Protect account password
+8. (Optional) To enable Intel iGPU acceleration, uncomment the `devices`
+   and `group_add` sections at the bottom
+9. Click **Save** — TrueNAS pulls the container image and starts it
 
-### Step 2 — Install the app
+<details>
+<summary>Click to expand the Docker Compose YAML</summary>
 
-1. Go to **Apps > Discover Apps**
-2. Search for **UniFi AI Port** — it should appear under your new catalog
-3. Click **Install**
-4. The install wizard asks for six things:
-   - **Protect Host** — IP of your UDM / UDM Pro / UNVR (e.g. `192.168.1.1`)
-   - **Username** — local Protect account username
-   - **Password** — local Protect account password
-   - **Intel GPU Passthrough** — toggle on if your TrueNAS box has an Intel
-     iGPU and you want hardware-accelerated inference
-   - **Web UI Port** — defaults to `8091`, change if that port is taken
-   - **Config Storage Path** — the dataset you created (e.g.
-     `/mnt/pool/apps/unifi-ai-port`)
-5. Click **Install** — TrueNAS pulls the container image and starts it
+```yaml
+services:
+  unifi-ai-port:
+    image: ghcr.io/richardctrimble/unifi-ai-port:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      # CHANGE ME: set to a TrueNAS dataset path
+      - /mnt/pool/apps/unifi-ai-port:/config
+    environment:
+      - PYTHONUNBUFFERED=1
+      # CHANGE ME: IP of your UDM / UDM Pro / UNVR
+      - UNIFI_HOST=192.168.1.1
+      # CHANGE ME: local Protect account username
+      - UNIFI_USERNAME=your-username
+      # CHANGE ME: local Protect account password
+      - UNIFI_PASSWORD=your-password
+      - WEB_TOOL_PORT=8091
+    # Uncomment for Intel iGPU acceleration (OpenVINO):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
+    #   - render
+```
 
-### Step 3 — Add cameras via the web UI
+</details>
+
+### Step 2 — Add cameras via the web UI
 
 On first boot the container starts in **web-only mode** (no cameras yet).
 
@@ -351,7 +372,7 @@ On first boot the container starts in **web-only mode** (no cameras yet).
 The container will now adopt each camera into Protect and start running
 AI inference.
 
-### Step 4 — Draw virtual lines (optional)
+### Step 3 — Draw virtual lines (optional)
 
 1. Open the web UI again (`http://<truenas-ip>:8091/`)
 2. Click the **Lines** tab
@@ -362,10 +383,11 @@ AI inference.
 
 ### How it works under the hood
 
-The TrueNAS install wizard passes your answers as environment variables.
-On first boot, the container's entrypoint (`docker-entrypoint.sh`)
-generates a minimal `config.yml` with your Protect credentials and
-`cameras: []`. The app starts in web-only mode, serving the config UI.
+The Docker Compose file passes your Protect credentials as environment
+variables. On first boot, the container's entrypoint
+(`docker-entrypoint.sh`) generates a minimal `config.yml` with your
+credentials and `cameras: []`. The app starts in web-only mode, serving
+the config UI.
 
 Once you add cameras via the web UI, the config is written to your
 dataset. After a restart, the app reads the full config, adopts the
@@ -376,15 +398,33 @@ restarts don't lose your settings.
 
 ### Intel iGPU on TrueNAS
 
-Enable "Intel GPU Passthrough" in the app settings. This passes
-`/dev/dri` into the container so OpenVINO can use the iGPU. Your
-TrueNAS user needs to be in the `render` group.
+Uncomment the `devices` and `group_add` sections in the compose YAML
+to pass `/dev/dri` into the container. This lets OpenVINO use the
+Intel iGPU for 2-3x faster inference.
 
-### Updating the app
+### Alternative: SSH / CLI install
 
-When a new version is released, TrueNAS will show an update badge on
-the app. Click **Update** to pull the latest image. Your config is
-preserved on the dataset.
+Since TrueNAS 24.10 ships native Docker tools, you can also deploy
+via SSH:
+
+```bash
+ssh root@<truenas-ip>
+mkdir -p /mnt/pool/apps/unifi-ai-port
+cd /mnt/pool/apps/unifi-ai-port
+# copy docker-compose.yaml here and edit it, then:
+docker compose up -d
+```
+
+### Updating
+
+Pull the latest image and recreate:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Or in the TrueNAS UI, edit the custom app and re-save to trigger a
+fresh image pull.
 
 ## Known limitations
 

@@ -1,0 +1,35 @@
+# TrueNAS Scale — "Install via YAML" Docker Compose for unifi-ai-port.
+#
+# How to use:
+#   1. In TrueNAS web UI: Apps > Discover Apps > Custom App > Install via YAML
+#   2. Paste this file into the editor
+#   3. Edit the four values marked CHANGE ME below
+#   4. Click Save — TrueNAS will pull the image and start the container
+#   5. Open http://<truenas-ip>:8091/ to add cameras via the web UI
+#
+# Camera and AI settings are managed through the web UI, not here.
+# This compose file only needs your Protect credentials and a storage path.
+
+services:
+  unifi-ai-port:
+    image: ghcr.io/richardctrimble/unifi-ai-port:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      # CHANGE ME: set to a TrueNAS dataset path, e.g. /mnt/pool/apps/unifi-ai-port
+      - /mnt/pool/apps/unifi-ai-port:/config
+    environment:
+      - PYTHONUNBUFFERED=1
+      # CHANGE ME: IP of your UDM / UDM Pro / UNVR
+      - UNIFI_HOST=192.168.1.1
+      # CHANGE ME: local Protect account username
+      - UNIFI_USERNAME=your-username
+      # CHANGE ME: local Protect account password
+      - UNIFI_PASSWORD=your-password
+      - WEB_TOOL_PORT=8091
+    # Uncomment the lines below to enable Intel iGPU acceleration (OpenVINO):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
+    #   - render
