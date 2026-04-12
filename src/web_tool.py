@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("web_tool")
 
+_VALID_DIRECTIONS = frozenset(
+    {"both", "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"}
+)
 
 # ─── HTML (single file, no external resources) ──────────────────────────────
 
@@ -548,7 +551,10 @@ class LineTool:
                 yaml.safe_dump(self.config, f, default_flow_style=False, sort_keys=False)
             os.replace(tmp_path, self.config_path)
         except Exception:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             raise
 
     def _find_camera_cfg(self, name: str) -> Optional[dict]:
@@ -663,7 +669,6 @@ class LineTool:
         if not isinstance(line, dict):
             return web.Response(status=400, text="invalid payload: expected a JSON object")
 
-        _VALID_DIRECTIONS = {"both", "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"}
         for coord in ("x1", "y1", "x2", "y2"):
             val = line.get(coord)
             if val is None:
