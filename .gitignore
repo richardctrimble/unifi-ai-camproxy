@@ -23,14 +23,14 @@ config/config.yml
 *.pt
 *.onnx
 
+# OpenVINO exported model cache (generated at runtime)
+config/*_openvino_model/
+
 # Snapshots / temp files
 *.jpg
 *.jpeg
 *.png
 tmp/
-
-# Docker
-.dockerignore
 
 # IDE
 .vscode/
