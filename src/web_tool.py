@@ -277,7 +277,12 @@ function createCameraCard(cam, idx) {
   return card;
 }
 
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;')
+    .replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;');
+}
 
 function renderCameras() {
   camerasDiv.innerHTML = '';
