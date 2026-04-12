@@ -23,6 +23,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -296,6 +298,7 @@ function renderCameras() {
 function readCamerasFromDOM() {
   const cards = camerasDiv.querySelectorAll('.card');
   const result = [];
+  const INTEGER_KEYS = new Set(['ai.frame_skip']);
   cards.forEach(card => {
     const cam = {};
     const ai = {};
@@ -303,7 +306,10 @@ function readCamerasFromDOM() {
       const key = el.dataset.key;
       let val;
       if (el.type === 'checkbox') val = el.checked;
-      else if (el.type === 'number') val = parseFloat(el.value);
+      else if (el.type === 'number') {
+        val = INTEGER_KEYS.has(key) ? parseInt(el.value, 10) : parseFloat(el.value);
+        if (isNaN(val)) return; // skip empty/invalid number fields
+      }
       else val = el.value.trim();
 
       if (key.startsWith('ai.')) {
@@ -523,17 +529,27 @@ class LineTool:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _reload_config(self) -> dict:
-        """Re-read config.yml from disk."""
+        """Re-read config.yml from disk, keeping the last-good config on error."""
         if self.config_path.exists():
-            with open(self.config_path) as f:
-                self.config = yaml.safe_load(f) or {}
+            try:
+                with open(self.config_path) as f:
+                    loaded = yaml.safe_load(f) or {}
+                self.config = loaded
+            except (yaml.YAMLError, OSError) as exc:
+                logger.warning("Failed to reload config from %s: %s", self.config_path, exc)
         return self.config
 
     def _write_config(self) -> None:
-        """Write current self.config back to config.yml."""
+        """Write current self.config back to config.yml atomically."""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, "w") as f:
-            yaml.dump(self.config, f, default_flow_style=False, sort_keys=False)
+        fd, tmp_path = tempfile.mkstemp(dir=self.config_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                yaml.safe_dump(self.config, f, default_flow_style=False, sort_keys=False)
+            os.replace(tmp_path, self.config_path)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
 
     def _find_camera_cfg(self, name: str) -> Optional[dict]:
         for cam in self.config.get("cameras", []):
@@ -586,12 +602,28 @@ class LineTool:
         except Exception:
             return web.Response(status=400, text="invalid JSON")
 
+        if not isinstance(body, dict):
+            return web.Response(status=400, text="invalid payload: expected a JSON object")
+
         new_cameras = body.get("cameras", [])
+        if not isinstance(new_cameras, list):
+            return web.Response(status=400, text="invalid payload: 'cameras' must be a list")
+
         # Clean up: remove empty optional fields
-        for cam in new_cameras:
+        for idx, cam in enumerate(new_cameras):
+            if not isinstance(cam, dict):
+                return web.Response(
+                    status=400,
+                    text=f"invalid payload: cameras[{idx}] must be an object",
+                )
             if not cam.get("snapshot_url"):
                 cam.pop("snapshot_url", None)
             ai = cam.get("ai", {})
+            if ai is not None and not isinstance(ai, dict):
+                return web.Response(
+                    status=400,
+                    text=f"invalid payload: cameras[{idx}].ai must be an object",
+                )
             if ai:
                 # Remove defaults so config stays clean
                 for key, default in [
@@ -627,6 +659,32 @@ class LineTool:
             line = await request.json()
         except Exception:
             return web.Response(status=400, text="invalid JSON")
+
+        if not isinstance(line, dict):
+            return web.Response(status=400, text="invalid payload: expected a JSON object")
+
+        _VALID_DIRECTIONS = {"both", "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"}
+        for coord in ("x1", "y1", "x2", "y2"):
+            val = line.get(coord)
+            if val is None:
+                return web.Response(status=400, text=f"missing required field: {coord}")
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                return web.Response(status=400, text=f"invalid value for {coord}: must be a number")
+            if not (0.0 <= fval <= 1.0):
+                return web.Response(status=400, text=f"invalid value for {coord}: must be in [0, 1]")
+            line[coord] = fval
+
+        direction = line.get("direction", "both")
+        if direction not in _VALID_DIRECTIONS:
+            return web.Response(
+                status=400,
+                text=f"invalid direction '{direction}': must be one of {sorted(_VALID_DIRECTIONS)}",
+            )
+
+        if not line.get("name"):
+            return web.Response(status=400, text="missing required field: name")
 
         self._reload_config()
         cam = self._find_camera_cfg(name)

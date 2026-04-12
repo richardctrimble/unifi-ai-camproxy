@@ -322,7 +322,7 @@ this works natively.
 1. Go to **Apps > Discover Apps**
 2. Search for **UniFi AI Port** — it should appear under your new catalog
 3. Click **Install**
-4. The install wizard asks for five things:
+4. The install wizard asks for six things:
    - **Protect Host** — IP of your UDM / UDM Pro / UNVR (e.g. `192.168.1.1`)
    - **Username** — local Protect account username
    - **Password** — local Protect account password
