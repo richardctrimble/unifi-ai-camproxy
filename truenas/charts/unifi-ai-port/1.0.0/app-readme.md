@@ -4,29 +4,19 @@ A DIY UniFi AI Port that runs on your TrueNAS box, spoofs as one or more
 UniFi cameras in Protect, and injects real-time **person/vehicle smart
 detections** from your existing RTSP cameras using YOLOv8 inference.
 
-## What it does
+## Setup
 
-- Each camera in your config appears as an adopted camera in UniFi Protect
-- Person and vehicle detections show on Protect's timeline with bounding
-  boxes and thumbnails
-- Virtual line crossing events (configure via the built-in web tool)
-- Fully automated adoption — no manual clicking in the Protect UI
+1. Install the app — the wizard only asks for your Protect host,
+   credentials, storage path, and GPU toggle
+2. Open `http://<truenas-ip>:8091/` (or your chosen port)
+3. Use the **Setup** tab to add cameras and configure AI settings
+4. Use the **Lines** tab to draw virtual crossing lines on live frames
+5. Click **Save** and restart the container to apply
+
+All configuration is managed through the web UI. Advanced users can
+also edit `config.yml` directly on the dataset.
 
 ## Hardware acceleration
 
-The default image auto-detects and uses the fastest available runtime:
-
-| Hardware | How to enable |
-|---|---|
-| **Intel iGPU** (N100 etc.) | Enable "Intel GPU" in the app settings |
-| **CPU** | Works out of the box, no config needed |
-
-For NVIDIA CUDA, use the standalone Docker image instead
-(`Dockerfile.cuda`).
-
-## After install
-
-1. Open `http://<truenas-ip>:8091/` to access the line-drawing tool
-2. Virtual lines are configured via the web tool and saved to config.yml
-3. For advanced per-camera settings, edit `/config/config.yml` directly
-   on the dataset you chose during install
+The default image auto-detects the fastest available runtime. Enable
+"Intel GPU Passthrough" in the app settings to use your Intel iGPU.

@@ -1,12 +1,5 @@
-# ─────────────────────────────────────────────────────────────────────────────
 # TrueNAS Scale docker-compose template for unifi-ai-port.
-#
-# TrueNAS 24.10+ (Electric Eel) renders this with values from
-# questions.yaml and runs it as a standard Docker Compose stack.
-#
-# The container's entrypoint (docker-entrypoint.sh) reads environment
-# variables and generates /config/config.yml on first boot.
-# ─────────────────────────────────────────────────────────────────────────────
+# Camera and AI settings are managed through the web UI, not here.
 
 services:
   unifi-ai-port:
@@ -20,17 +13,6 @@ services:
       - UNIFI_HOST={{ values.unifi.host }}
       - UNIFI_USERNAME={{ values.unifi.username }}
       - UNIFI_PASSWORD={{ values.unifi.password }}
-      - UNIFI_TOKEN={{ values.unifi.token }}
-      - CAMERAS={{ values.cameras | tojson }}
-      - AI_MODEL={{ values.ai.model }}
-      - AI_DEVICE={{ values.ai.device }}
-      - AI_CONFIDENCE={{ values.ai.confidence }}
-      - AI_CONFIDENCE_PERSON={{ values.ai.confidence_person }}
-      - AI_CONFIDENCE_VEHICLE={{ values.ai.confidence_vehicle }}
-      - AI_DETECT_PERSONS={{ values.ai.detect_persons }}
-      - AI_DETECT_VEHICLES={{ values.ai.detect_vehicles }}
-      - AI_FRAME_SKIP={{ values.ai.frame_skip }}
-      - WEB_TOOL_ENABLED={{ values.web_tool.enabled }}
       - WEB_TOOL_PORT={{ values.web_tool.port }}
 {% if values.gpu.intel %}
     devices:

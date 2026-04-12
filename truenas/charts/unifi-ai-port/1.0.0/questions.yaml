@@ -1,24 +1,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # TrueNAS Scale app install wizard for unifi-ai-port.
 #
-# This file defines the form fields shown in the TrueNAS UI when a user
-# installs or edits the app. Answers are passed as environment variables
-# to the container, where docker-entrypoint.sh generates config.yml.
+# Deliberately minimal — just enough to get the container running and
+# talking to Protect. All camera and AI configuration is done through
+# the embedded web UI at http://<truenas-ip>:<web_port>/ after install.
 # ─────────────────────────────────────────────────────────────────────────────
 
 groups:
   - name: "UniFi Controller"
     description: "Connection to your UniFi Protect controller"
-  - name: "Cameras"
-    description: "RTSP cameras to monitor"
-  - name: "AI Settings"
-    description: "Detection model, device, and confidence thresholds"
   - name: "GPU Acceleration"
     description: "Hardware acceleration for AI inference"
-  - name: "Web Tool"
-    description: "Embedded line-drawing UI"
+  - name: "Web UI"
+    description: "Configuration and line-drawing web interface"
   - name: "Storage"
-    description: "Persistent storage for configuration"
+    description: "Persistent storage for configuration and model cache"
 
 questions:
   # ── UniFi Controller ─────────────────────────────────────────────────────
@@ -34,7 +30,7 @@ questions:
 
   - variable: unifi.username
     label: "Username"
-    description: "Local Protect account username (used to auto-fetch adoption token and auto-accept cameras)"
+    description: "Local Protect account username"
     group: "UniFi Controller"
     schema:
       type: string
@@ -51,167 +47,22 @@ questions:
       private: true
       default: ""
 
-  - variable: unifi.token
-    label: "Manual Adoption Token"
-    description: "Optional — paste a token here instead of using username/password. Leave blank to auto-fetch."
-    group: "UniFi Controller"
-    schema:
-      type: string
-      default: ""
-
-  # ── Cameras ──────────────────────────────────────────────────────────────
-
-  - variable: cameras
-    label: "Cameras"
-    description: "Add one or more RTSP cameras. Each becomes a virtual device in Protect."
-    group: "Cameras"
-    schema:
-      type: list
-      required: true
-      min: 1
-      default:
-        - name: "Camera 1"
-          rtsp_url: ""
-          snapshot_url: ""
-      items:
-        - variable: cameraEntry
-          label: "Camera"
-          schema:
-            type: dict
-            attrs:
-              - variable: name
-                label: "Camera Name"
-                description: "Display name in Protect (also used to generate a stable fake MAC)"
-                schema:
-                  type: string
-                  required: true
-                  default: ""
-
-              - variable: rtsp_url
-                label: "RTSP URL"
-                description: "Full RTSP stream URL, e.g. rtsp://admin:pass@192.168.1.50:554/stream1"
-                schema:
-                  type: string
-                  required: true
-                  default: ""
-
-              - variable: snapshot_url
-                label: "Snapshot URL"
-                description: "Optional HTTP URL for still snapshots (used for Protect thumbnails)"
-                schema:
-                  type: string
-                  default: ""
-
-  # ── AI Settings ──────────────────────────────────────────────────────────
-
-  - variable: ai.model
-    label: "YOLO Model"
-    description: "yolov8n=fast/light, yolov8s=balanced, yolov8m=accurate/heavy"
-    group: "AI Settings"
-    schema:
-      type: string
-      required: true
-      default: "yolov8n.pt"
-      enum:
-        - value: "yolov8n.pt"
-          description: "YOLOv8 Nano — fast, ~400MB RAM"
-        - value: "yolov8s.pt"
-          description: "YOLOv8 Small — balanced, ~600MB RAM"
-        - value: "yolov8m.pt"
-          description: "YOLOv8 Medium — accurate, ~1.2GB RAM"
-
-  - variable: ai.device
-    label: "Inference Device"
-    description: "'auto' probes and picks the fastest available runtime"
-    group: "AI Settings"
-    schema:
-      type: string
-      required: true
-      default: "auto"
-      enum:
-        - value: "auto"
-          description: "Auto-detect best available (recommended)"
-        - value: "cpu"
-          description: "Force CPU"
-        - value: "intel:gpu"
-          description: "Intel iGPU / dGPU via OpenVINO"
-        - value: "intel:cpu"
-          description: "Intel CPU via OpenVINO"
-        - value: "intel:npu"
-          description: "Intel NPU (Meteor/Arrow Lake)"
-
-  - variable: ai.confidence
-    label: "Default Confidence Threshold"
-    description: "Fallback threshold for any detection class (0.0–1.0)"
-    group: "AI Settings"
-    schema:
-      type: string
-      default: "0.50"
-
-  - variable: ai.confidence_person
-    label: "Person Confidence"
-    description: "Confidence threshold for person detections"
-    group: "AI Settings"
-    schema:
-      type: string
-      default: "0.45"
-
-  - variable: ai.confidence_vehicle
-    label: "Vehicle Confidence"
-    description: "Confidence threshold for vehicle detections (higher recommended — YOLO flips car/truck/bus near 0.5)"
-    group: "AI Settings"
-    schema:
-      type: string
-      default: "0.60"
-
-  - variable: ai.detect_persons
-    label: "Detect Persons"
-    group: "AI Settings"
-    schema:
-      type: boolean
-      default: true
-
-  - variable: ai.detect_vehicles
-    label: "Detect Vehicles"
-    group: "AI Settings"
-    schema:
-      type: boolean
-      default: true
-
-  - variable: ai.frame_skip
-    label: "Frame Skip"
-    description: "Analyse every Nth frame (higher = less CPU, slower response)"
-    group: "AI Settings"
-    schema:
-      type: int
-      required: true
-      default: 3
-      min: 1
-      max: 30
-
   # ── GPU Acceleration ─────────────────────────────────────────────────────
 
   - variable: gpu.intel
     label: "Enable Intel GPU Passthrough"
-    description: "Pass /dev/dri into the container so OpenVINO can use the Intel iGPU. Requires the render group on TrueNAS."
+    description: "Pass /dev/dri into the container for Intel iGPU acceleration via OpenVINO"
     group: "GPU Acceleration"
     schema:
       type: boolean
       default: false
 
-  # ── Web Tool ─────────────────────────────────────────────────────────────
-
-  - variable: web_tool.enabled
-    label: "Enable Line-Drawing Web Tool"
-    description: "Serves a browser UI for drawing virtual lines on live camera frames"
-    group: "Web Tool"
-    schema:
-      type: boolean
-      default: true
+  # ── Web UI ───────────────────────────────────────────────────────────────
 
   - variable: web_tool.port
-    label: "Web Tool Port"
-    group: "Web Tool"
+    label: "Web UI Port"
+    description: "After install, open http://<truenas-ip>:<port>/ to add cameras and configure detection"
+    group: "Web UI"
     schema:
       type: int
       default: 8091
