@@ -166,12 +166,12 @@ for a fully commented template with three example cameras.
 | `password` | recommended | — | Local Protect account password |
 | `token` | no | auto-fetched | Manual adoption token (skip username/password) |
 
-### `web_tool` — embedded line-drawing UI
+### `web_tool` — embedded configuration + line-drawing UI
 
 | Key | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Serve the web UI on the port below |
-| `port` | `8091` | HTTP port for the line-drawing tool |
+| `port` | `8091` | HTTP port for the config + line-drawing UI |
 
 ### `cameras[]` — one entry per virtual camera
 
@@ -217,22 +217,23 @@ smart-detection event is injected into Protect's timeline.
 
 ### Drawing a line visually
 
-Don't try to eyeball coordinates — the container ships an embedded line
-tool. Once `docker compose up` is running, open:
+Don't try to eyeball coordinates — the container ships an embedded web
+UI. Once `docker compose up` is running, open:
 
 ```
 http://<docker-host-ip>:8091/
 ```
 
-in any browser (phone / iPad works fine). Pick a camera from the dropdown,
-click two points on the live frame, tweak the name and direction, then
-copy the generated YAML into your `config/config.yml` under that camera's
-`ai.lines:` block and `docker compose restart` to apply.
+in any browser (phone / iPad works fine). Click the **Lines** tab, pick
+a camera from the dropdown, click two points on the live frame, set the
+name and direction, then click **Save Line**. The line is written
+directly to `config.yml` — restart the container to apply.
 
 Existing lines are rendered as dashed grey overlays so you can see what
-you've already got.
+you've already got. You can also delete lines from the list below the
+frame.
 
-Disable the tool by setting `web_tool.enabled: false` in config.yml.
+Disable the web UI by setting `web_tool.enabled: false` in config.yml.
 
 ## Multi-camera
 
@@ -294,30 +295,96 @@ The repo includes a TrueNAS Scale custom app catalog under `truenas/`.
 TrueNAS 24.10+ (Electric Eel) runs apps as Docker Compose stacks, so
 this works natively.
 
-### Install from the catalog
+### Prerequisites
 
-1. In TrueNAS: **Apps > Discover > Manage Catalogs > Add Catalog**
-2. Point it at this repo (or a fork), branch `main`, path `truenas`
-3. The app appears in the catalog — click **Install**
-4. Fill in the wizard: Protect host, credentials, camera RTSP URLs, model,
-   GPU toggle
-5. Choose a dataset path for persistent config (e.g.
-   `/mnt/pool/apps/unifi-ai-port`)
-6. Click **Install** — the container starts and adopts cameras automatically
+- TrueNAS Scale **24.10 (Electric Eel)** or newer
+- A dataset for persistent config (e.g. create `apps/unifi-ai-port`
+  under your pool)
+- Your UniFi Protect controller IP and a local account (username + password)
 
-### How it works
+### Step 1 — Add the catalog
 
-The TrueNAS install wizard (defined in `questions.yaml`) passes your
-answers as environment variables. The container's entrypoint generates
-`config.yml` from those env vars on first boot. After that the file
-persists on your dataset — edit it directly for advanced settings like
-virtual lines (or use the web tool at `http://<truenas-ip>:8091/`).
+1. Open the TrueNAS web UI
+2. Go to **Apps** in the left sidebar
+3. Click **Discover Apps** at the top right
+4. Click the **Manage Catalogs** button (gear icon, top right)
+5. Click **Add Catalog**
+6. Fill in the form:
+   - **Catalog Name:** `happy-ai-port` (or any name you like)
+   - **Repository:** `https://github.com/richardctrimble/happy-ai-port.git`
+   - **Preferred Trains:** `charts`
+   - **Branch:** `main`
+7. Click **Save** — TrueNAS will pull the repo and index the catalog
+   (this may take a minute)
+
+### Step 2 — Install the app
+
+1. Go to **Apps > Discover Apps**
+2. Search for **UniFi AI Port** — it should appear under your new catalog
+3. Click **Install**
+4. The install wizard asks for six things:
+   - **Protect Host** — IP of your UDM / UDM Pro / UNVR (e.g. `192.168.1.1`)
+   - **Username** — local Protect account username
+   - **Password** — local Protect account password
+   - **Intel GPU Passthrough** — toggle on if your TrueNAS box has an Intel
+     iGPU and you want hardware-accelerated inference
+   - **Web UI Port** — defaults to `8091`, change if that port is taken
+   - **Config Storage Path** — the dataset you created (e.g.
+     `/mnt/pool/apps/unifi-ai-port`)
+5. Click **Install** — TrueNAS pulls the container image and starts it
+
+### Step 3 — Add cameras via the web UI
+
+On first boot the container starts in **web-only mode** (no cameras yet).
+
+1. Open your browser and go to `http://<truenas-ip>:8091/`
+   (replace with your TrueNAS IP and the port you chose)
+2. You'll see the **Setup** tab — click **+ Add Camera**
+3. Fill in the camera details:
+   - **Name** — what this camera will be called in Protect
+   - **RTSP URL** — the camera's RTSP stream address
+   - Adjust AI settings if needed (model, confidence, frame skip, etc.)
+4. Add more cameras if you want (up to ~5 per AI Port, depending on hardware)
+5. Click **Save All**
+6. Go back to TrueNAS and **restart the app** (Apps > your app > Restart)
+
+The container will now adopt each camera into Protect and start running
+AI inference.
+
+### Step 4 — Draw virtual lines (optional)
+
+1. Open the web UI again (`http://<truenas-ip>:8091/`)
+2. Click the **Lines** tab
+3. Pick a camera from the dropdown — you'll see a live frame
+4. Click two points on the frame to draw a line
+5. Set the line name and direction, then click **Save Line**
+6. Restart the app to apply
+
+### How it works under the hood
+
+The TrueNAS install wizard passes your answers as environment variables.
+On first boot, the container's entrypoint (`docker-entrypoint.sh`)
+generates a minimal `config.yml` with your Protect credentials and
+`cameras: []`. The app starts in web-only mode, serving the config UI.
+
+Once you add cameras via the web UI, the config is written to your
+dataset. After a restart, the app reads the full config, adopts the
+cameras into Protect, and starts AI inference.
+
+The config file persists on your TrueNAS dataset, so updates and
+restarts don't lose your settings.
 
 ### Intel iGPU on TrueNAS
 
 Enable "Intel GPU Passthrough" in the app settings. This passes
 `/dev/dri` into the container so OpenVINO can use the iGPU. Your
 TrueNAS user needs to be in the `render` group.
+
+### Updating the app
+
+When a new version is released, TrueNAS will show an update badge on
+the app. Click **Update** to pull the latest image. Your config is
+preserved on the dataset.
 
 ## Known limitations
 
