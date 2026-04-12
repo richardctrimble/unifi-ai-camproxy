@@ -173,6 +173,12 @@ async def main():
         tasks.append(asyncio.create_task(tool.run(port)))
 
     if not cameras:
+        if not tasks:
+            logger.error(
+                "No cameras configured and web UI is disabled — nothing to run. "
+                "Enable the web UI or add cameras to config.yml."
+            )
+            sys.exit(1)
         logger.info(
             "No cameras configured — running in web-only mode. "
             "Open the web UI to add cameras, then restart the container."
