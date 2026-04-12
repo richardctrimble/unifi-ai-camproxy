@@ -161,30 +161,37 @@ async def main():
     cfg = load_config(config_path)
     cameras = cfg.get("cameras", [])
 
-    if not cameras:
-        logger.error("No cameras defined in config.yml")
-        sys.exit(1)
+    tasks = []
 
-    # 1. Adoption token (auto or manual)
+    # 1. Start web UI first — it must be reachable even with zero cameras
+    #    so users can add cameras via the Setup tab on first install.
+    web_cfg = cfg.get("web_tool", {}) or {}
+    if web_cfg.get("enabled", True):
+        port = int(web_cfg.get("port", 8091))
+        tool = LineTool(camera_registry, cfg, config_path=config_path)
+        logger.info("Starting web UI on port %d", port)
+        tasks.append(asyncio.create_task(tool.run(port)))
+
+    if not cameras:
+        logger.info(
+            "No cameras configured — running in web-only mode. "
+            "Open the web UI to add cameras, then restart the container."
+        )
+        await asyncio.gather(*tasks, return_exceptions=False)
+        return
+
+    # 2. Adoption token (auto or manual)
     token = await ensure_adoption_token(cfg)
 
-    # 2. Fill in optional per-camera defaults
+    # 3. Fill in optional per-camera defaults
     local_ip = detect_local_ip()
     logger.info("Detected local IP: %s", local_ip)
     for cam in cameras:
         fill_camera_defaults(cam, local_ip)
 
-    # 3. Start all camera workers + the background auto-adopt task
-    tasks = [asyncio.create_task(run_camera(cam, cfg, token)) for cam in cameras]
+    # 4. Start all camera workers + the background auto-adopt task
+    tasks.extend(asyncio.create_task(run_camera(cam, cfg, token)) for cam in cameras)
     tasks.append(asyncio.create_task(auto_adopt_pending(cfg, cameras)))
-
-    # 4. Optional web UI for drawing virtual lines on live frames
-    web_cfg = cfg.get("web_tool", {}) or {}
-    if web_cfg.get("enabled", True):
-        port = int(web_cfg.get("port", 8091))
-        tool = LineTool(camera_registry, cfg)
-        logger.info("Starting line tool UI on port %d", port)
-        tasks.append(asyncio.create_task(tool.run(port)))
 
     await asyncio.gather(*tasks, return_exceptions=False)
 

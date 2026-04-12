@@ -304,17 +304,16 @@ cameras:
 - [x] Full config reference tables in README + troubleshooting section
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
 
-### In progress / uncommitted
+### Recently completed
 
-- [ ] **Web UI config management** — expanding `web_tool.py` from a line-only tool into a full config UI. The plan:
-  - Tabbed interface: **Setup** tab (add/edit/remove cameras, per-camera AI settings) + **Lines** tab (existing line-drawing tool, plus direct save to config)
-  - `GET /api/config` → returns camera + AI settings (not passwords)
-  - `POST /api/config` → writes cameras + AI settings back to config.yml via pyyaml
-  - Lines tab gets a "Save line" button that appends directly to config.yml (no more copy-paste YAML)
-  - After save, UI shows "Restart the container to apply changes"
-  - **Why**: TrueNAS questions.yaml was stripped down to bare minimum (host/creds/GPU/storage). All camera + AI config is done through the web UI instead.
-- [ ] **Zero-camera startup** — `main.py` needs to handle `cameras: []` gracefully (run the web tool only, skip adoption + camera workers, wait for user to add cameras via UI and restart)
-- [ ] Commit + push the web UI expansion + main.py zero-camera handling
+- [x] **Web UI config management** — `web_tool.py` rewritten with tabbed interface:
+  - **Setup** tab: add/edit/remove cameras + per-camera AI settings (model, confidence, frame_skip, detect toggles). Save writes directly to config.yml via pyyaml.
+  - **Lines** tab: draw lines on live frames, save/delete directly to config.yml (no more copy-paste YAML).
+  - New endpoints: `GET/POST /api/config`, `POST /api/lines/{name}`, `DELETE /api/lines/{name}/{idx}`
+  - `LineTool` now takes `config_path` parameter, has `_reload_config()` and `_write_config()` methods.
+  - After save, UI shows "Restart the container to apply changes" banner.
+- [x] **Zero-camera startup** — `main.py` handles `cameras: []` gracefully: starts the web UI first, logs "running in web-only mode", skips adoption + camera workers. Container stays alive so users can add cameras via the Setup tab.
+- [x] **TrueNAS README** — added step-by-step install guide (add catalog, install app, add cameras via web UI, draw lines, how it works under the hood).
 
 ### Key design decision (current session)
 
