@@ -118,12 +118,22 @@ happy-ai-port/
 ├── docker-compose.yml          # Builds default Dockerfile; host network + /config mount
 ├── docker-compose.gpu.yml      # Override → switches build to Dockerfile.cuda + nvidia device
 ├── docker-compose.intel.yml    # Override → passes /dev/dri into default image (no rebuild)
+├── docker-entrypoint.sh        # Generates config.yml from env vars (TrueNAS mode)
+├── .dockerignore               # Keeps build context lean
 ├── requirements.txt            # ultralytics, opencv-python-headless, pyyaml, aiohttp, websockets...
 ├── README.md                   # Setup instructions
 ├── SECONDBRAIN.md              # ← this file
 ├── config/
 │   ├── config.yml              # GITIGNORED — user's real config with credentials
-│   └── config.example.yml      # Committed — template for users
+│   └── config.example.yml      # Committed — 3-camera template for users
+├── truenas/                    # TrueNAS Scale custom app catalog
+│   └── charts/unifi-ai-port/1.0.0/
+│       ├── Chart.yaml          # Helm chart metadata
+│       ├── values.yaml         # Default values
+│       ├── questions.yaml      # TrueNAS UI install wizard
+│       ├── docker-compose.yaml # Template rendered by TrueNAS
+│       ├── app-readme.md       # Description in TrueNAS app store
+│       └── item.yaml           # Categories + icon
 └── src/
     ├── main.py                 # Entry point — loads config, orchestrates auto-adoption
     ├── unifi_auth.py           # Local Protect API client (token fetch + accept adoption)
@@ -288,6 +298,10 @@ cameras:
 - [x] Split image strategy: default `Dockerfile` (~1.5GB) ships CPU torch + OpenVINO + Intel compute runtime — covers CPU and Intel iGPU/dGPU/NPU hosts in a single build. Sibling `Dockerfile.cuda` (~2.5GB) swaps in the CUDA 12.1 PyTorch wheel for NVIDIA hosts. Split keeps each image targeted instead of shipping 3.5GB of runtimes nobody uses.
 - [x] `docker-compose.intel.yml` just passes through `/dev/dri` — no rebuild needed, the default image already has OpenVINO. Auto-exports YOLOv8 to OpenVINO IR format on first run and caches under `/config/<model>_openvino_model/`. Targets N100 hardware recommendation — 2–3× CPU throughput on integrated UHD.
 - [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-port:cuda` so it doesn't collide with the default tag.
+- [x] TrueNAS Scale custom app catalog (`truenas/` dir) — questions.yaml wizard for host/creds/cameras/AI/GPU, docker-entrypoint.sh generates config.yml from env vars on first boot, works standalone or TrueNAS. Config persists on the dataset so advanced users can edit it directly.
+- [x] `.dockerignore` — keeps .git, __pycache__, SECONDBRAIN, secrets out of the Docker build context
+- [x] Multi-camera config example (3 cameras: full options, minimal, vehicles-only with two lines)
+- [x] Full config reference tables in README + troubleshooting section
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
 
 ---

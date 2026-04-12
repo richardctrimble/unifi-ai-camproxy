@@ -1,0 +1,39 @@
+# Default values for unifi-ai-port TrueNAS app.
+# These are overridden by answers from questions.yaml in the TrueNAS UI.
+
+image:
+  repository: ghcr.io/richardctrimble/unifi-ai-port
+  tag: latest
+  pullPolicy: IfNotPresent
+
+unifi:
+  host: ""
+  username: ""
+  password: ""
+  token: ""
+
+cameras: []
+  # - name: "Front Door"
+  #   rtsp_url: "rtsp://admin:pass@192.168.1.50:554/stream1"
+  #   snapshot_url: ""
+
+ai:
+  model: "yolov8n.pt"
+  device: "auto"
+  confidence: 0.50
+  confidence_person: 0.45
+  confidence_vehicle: 0.60
+  detect_persons: true
+  detect_vehicles: true
+  frame_skip: 3
+
+web_tool:
+  enabled: true
+  port: 8091
+
+gpu:
+  intel: false
+
+persistence:
+  config:
+    hostPath: ""

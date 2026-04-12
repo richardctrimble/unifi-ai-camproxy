@@ -288,6 +288,37 @@ thresholds, detection classes, and virtual lines. See
 - Use `yolov8n.pt` (fastest model)
 - Enable hardware acceleration (Intel iGPU or NVIDIA GPU)
 
+## TrueNAS Scale app
+
+The repo includes a TrueNAS Scale custom app catalog under `truenas/`.
+TrueNAS 24.10+ (Electric Eel) runs apps as Docker Compose stacks, so
+this works natively.
+
+### Install from the catalog
+
+1. In TrueNAS: **Apps > Discover > Manage Catalogs > Add Catalog**
+2. Point it at this repo (or a fork), branch `main`, path `truenas`
+3. The app appears in the catalog — click **Install**
+4. Fill in the wizard: Protect host, credentials, camera RTSP URLs, model,
+   GPU toggle
+5. Choose a dataset path for persistent config (e.g.
+   `/mnt/pool/apps/unifi-ai-port`)
+6. Click **Install** — the container starts and adopts cameras automatically
+
+### How it works
+
+The TrueNAS install wizard (defined in `questions.yaml`) passes your
+answers as environment variables. The container's entrypoint generates
+`config.yml` from those env vars on first boot. After that the file
+persists on your dataset — edit it directly for advanced settings like
+virtual lines (or use the web tool at `http://<truenas-ip>:8091/`).
+
+### Intel iGPU on TrueNAS
+
+Enable "Intel GPU Passthrough" in the app settings. This passes
+`/dev/dri` into the container so OpenVINO can use the iGPU. Your
+TrueNAS user needs to be in the `render` group.
+
 ## Known limitations
 
 - Smart detection injection can be fragile across Protect firmware updates
