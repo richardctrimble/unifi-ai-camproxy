@@ -126,14 +126,8 @@ happy-ai-port/
 ├── config/
 │   ├── config.yml              # GITIGNORED — user's real config with credentials
 │   └── config.example.yml      # Committed — 3-camera template for users
-├── truenas/                    # TrueNAS Scale custom app catalog
-│   └── charts/unifi-ai-port/1.0.0/
-│       ├── Chart.yaml          # Helm chart metadata
-│       ├── values.yaml         # Default values
-│       ├── questions.yaml      # TrueNAS UI install wizard
-│       ├── docker-compose.yaml # Template rendered by TrueNAS
-│       ├── app-readme.md       # Description in TrueNAS app store
-│       └── item.yaml           # Categories + icon
+├── truenas/                    # TrueNAS Scale install files
+│   └── docker-compose.yaml     # Ready-to-paste compose for TrueNAS "Install via YAML"
 └── src/
     ├── main.py                 # Entry point — loads config, orchestrates auto-adoption
     ├── unifi_auth.py           # Local Protect API client (token fetch + accept adoption)
@@ -298,7 +292,7 @@ cameras:
 - [x] Split image strategy: default `Dockerfile` (~1.5GB) ships CPU torch + OpenVINO + Intel compute runtime — covers CPU and Intel iGPU/dGPU/NPU hosts in a single build. Sibling `Dockerfile.cuda` (~2.5GB) swaps in the CUDA 12.1 PyTorch wheel for NVIDIA hosts. Split keeps each image targeted instead of shipping 3.5GB of runtimes nobody uses.
 - [x] `docker-compose.intel.yml` just passes through `/dev/dri` — no rebuild needed, the default image already has OpenVINO. Auto-exports YOLOv8 to OpenVINO IR format on first run and caches under `/config/<model>_openvino_model/`. Targets N100 hardware recommendation — 2–3× CPU throughput on integrated UHD.
 - [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-port:cuda` so it doesn't collide with the default tag.
-- [x] TrueNAS Scale custom app catalog (`truenas/` dir) — minimal wizard (host, creds, GPU, storage, web port), docker-entrypoint.sh generates a seed config.yml from env vars. All camera and AI configuration moves to the web UI.
+- [x] TrueNAS Scale Docker Compose YAML (`truenas/docker-compose.yaml`) — ready-to-paste into TrueNAS 24.10+ "Install via YAML" feature. User edits 4 values (host, creds, storage path), docker-entrypoint.sh generates a seed config.yml from env vars. All camera and AI configuration moves to the web UI. (Old Helm chart catalog removed — TrueNAS 24.10+ dropped custom catalog support entirely.)
 - [x] `.dockerignore` — keeps .git, __pycache__, SECONDBRAIN, secrets out of the Docker build context
 - [x] Multi-camera config example (3 cameras: full options, minimal, vehicles-only with two lines)
 - [x] Full config reference tables in README + troubleshooting section
@@ -313,14 +307,14 @@ cameras:
   - `LineTool` now takes `config_path` parameter, has `_reload_config()` and `_write_config()` methods.
   - After save, UI shows "Restart the container to apply changes" banner.
 - [x] **Zero-camera startup** — `main.py` handles `cameras: []` gracefully: starts the web UI first, logs "running in web-only mode", skips adoption + camera workers. Container stays alive so users can add cameras via the Setup tab.
-- [x] **TrueNAS README** — added step-by-step install guide (add catalog, install app, add cameras via web UI, draw lines, how it works under the hood).
+- [x] **TrueNAS README** — added step-by-step install guide (paste Docker Compose YAML, add cameras via web UI, draw lines, how it works under the hood). Updated for 24.10+ which removed custom catalog support.
 
 ### Key design decision (current session)
 
-**TrueNAS app philosophy**: The TrueNAS install wizard asks for just enough to get the container running (Protect host, credentials, storage path, Intel GPU toggle, web port). Everything else — cameras, RTSP URLs, AI model, confidence thresholds, detection toggles, virtual lines — is configured through the embedded web UI at `:8091`. This keeps the TrueNAS form simple (5 fields) and means the same UI works for standalone Docker and TrueNAS users.
+**TrueNAS app philosophy**: TrueNAS 24.10+ (Electric Eel) removed custom app catalogs entirely, replacing the old Kubernetes/Helm system with native Docker Compose. We provide a ready-to-paste `truenas/docker-compose.yaml` that users paste into the "Install via YAML" feature. The compose file asks for just enough to get the container running (Protect host, credentials, storage path). Everything else — cameras, RTSP URLs, AI model, confidence thresholds, detection toggles, virtual lines — is configured through the embedded web UI at `:8091`. This keeps the compose file simple (4 values to edit) and means the same UI works for standalone Docker and TrueNAS users.
 
 Flow:
-1. Install TrueNAS app → wizard seeds config.yml with unifi section + web_tool enabled
+1. TrueNAS UI → Apps → Custom App → Install via YAML → paste compose, edit 4 values → Save
 2. Container starts in web-only mode (no cameras yet)
 3. User opens `http://<host>:8091/` → Setup tab → adds cameras → saves
 4. User restarts container → cameras start, detection begins
