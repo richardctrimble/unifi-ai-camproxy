@@ -118,12 +118,22 @@ happy-ai-port/
 ├── docker-compose.yml          # Builds default Dockerfile; host network + /config mount
 ├── docker-compose.gpu.yml      # Override → switches build to Dockerfile.cuda + nvidia device
 ├── docker-compose.intel.yml    # Override → passes /dev/dri into default image (no rebuild)
+├── docker-entrypoint.sh        # Generates config.yml from env vars (TrueNAS mode)
+├── .dockerignore               # Keeps build context lean
 ├── requirements.txt            # ultralytics, opencv-python-headless, pyyaml, aiohttp, websockets...
 ├── README.md                   # Setup instructions
 ├── SECONDBRAIN.md              # ← this file
 ├── config/
 │   ├── config.yml              # GITIGNORED — user's real config with credentials
-│   └── config.example.yml      # Committed — template for users
+│   └── config.example.yml      # Committed — 3-camera template for users
+├── truenas/                    # TrueNAS Scale custom app catalog
+│   └── charts/unifi-ai-port/1.0.0/
+│       ├── Chart.yaml          # Helm chart metadata
+│       ├── values.yaml         # Default values
+│       ├── questions.yaml      # TrueNAS UI install wizard
+│       ├── docker-compose.yaml # Template rendered by TrueNAS
+│       ├── app-readme.md       # Description in TrueNAS app store
+│       └── item.yaml           # Categories + icon
 └── src/
     ├── main.py                 # Entry point — loads config, orchestrates auto-adoption
     ├── unifi_auth.py           # Local Protect API client (token fetch + accept adoption)
@@ -164,24 +174,24 @@ happy-ai-port/
   fake MAC shows up in pending-adopt state, then PATCHes
   `{name, isAdopting: false, isAdopted: true}` to `/cameras/<id>`.
 
-### web_tool.py — embedded line-drawing UI
+### web_tool.py — embedded config + line-drawing UI
 - Single-file aiohttp server running in-process alongside the camera
-  workers. `LineTool(registry, config).run(port=8091)` is spawned as
-  another asyncio task from `main.py`.
-- `GET /` → serves `INDEX_HTML` (inline single-page tool, no external
-  assets, works on iPad Safari / any mobile browser).
+  workers. `LineTool(registry, config, config_path).run(port=8091)` is
+  spawned as another asyncio task from `main.py`.
+- `GET /` → serves `INDEX_HTML` — inline single-page app, no external
+  assets, works on iPad Safari / any mobile browser.
+- **Setup tab (IN PROGRESS):** add/edit/remove cameras + per-camera AI settings.
+  `GET /api/config` returns camera + AI config (not passwords).
+  `POST /api/config` writes changes back to config.yml via pyyaml.
+  Shows "restart to apply" banner after save.
+- **Lines tab:** existing line-drawing tool. Pick camera → click two points
+  on live frame → set name + direction → save directly to config.yml
+  (no more copy-paste).
 - `GET /api/cameras` → list of configured camera names.
-- `GET /api/frame/<name>` → JPEG encoded from `AIEngine.get_latest_frame()`
-  via `cv2.imencode`.
-- `GET /api/lines/<name>` → existing lines from `config.yml` so the UI
-  can draw them as dashed grey overlays for reference.
-- UI flow: pick camera → click two points on live frame → tweak name
-  and direction → copy YAML → paste under that camera's `ai.lines:`.
-  Coordinates are stored as normalised 0-1 from the click's
-  `getBoundingClientRect` fraction, which matches exactly what
-  `LineCrossingDetector` expects.
-- Read-only — never writes back to `config.yml` (safer, avoids
-  clobbering user formatting).
+- `GET /api/frame/<name>` → JPEG from `AIEngine.get_latest_frame()`.
+- `GET /api/lines/<name>` → existing lines for the overlay.
+- Coordinates are normalised 0-1 from `getBoundingClientRect` fraction,
+  matching `LineCrossingDetector`'s expectations.
 
 ### auto_config.py — zero-config helpers
 - `generate_mac(name)` — MD5 of the name, first byte masked to set the
@@ -288,7 +298,34 @@ cameras:
 - [x] Split image strategy: default `Dockerfile` (~1.5GB) ships CPU torch + OpenVINO + Intel compute runtime — covers CPU and Intel iGPU/dGPU/NPU hosts in a single build. Sibling `Dockerfile.cuda` (~2.5GB) swaps in the CUDA 12.1 PyTorch wheel for NVIDIA hosts. Split keeps each image targeted instead of shipping 3.5GB of runtimes nobody uses.
 - [x] `docker-compose.intel.yml` just passes through `/dev/dri` — no rebuild needed, the default image already has OpenVINO. Auto-exports YOLOv8 to OpenVINO IR format on first run and caches under `/config/<model>_openvino_model/`. Targets N100 hardware recommendation — 2–3× CPU throughput on integrated UHD.
 - [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-port:cuda` so it doesn't collide with the default tag.
+- [x] TrueNAS Scale custom app catalog (`truenas/` dir) — minimal wizard (host, creds, GPU, storage, web port), docker-entrypoint.sh generates a seed config.yml from env vars. All camera and AI configuration moves to the web UI.
+- [x] `.dockerignore` — keeps .git, __pycache__, SECONDBRAIN, secrets out of the Docker build context
+- [x] Multi-camera config example (3 cameras: full options, minimal, vehicles-only with two lines)
+- [x] Full config reference tables in README + troubleshooting section
 - [x] Git repo live at github.com/richardctrimble/happy-ai-port
+
+### In progress / uncommitted
+
+- [ ] **Web UI config management** — expanding `web_tool.py` from a line-only tool into a full config UI. The plan:
+  - Tabbed interface: **Setup** tab (add/edit/remove cameras, per-camera AI settings) + **Lines** tab (existing line-drawing tool, plus direct save to config)
+  - `GET /api/config` → returns camera + AI settings (not passwords)
+  - `POST /api/config` → writes cameras + AI settings back to config.yml via pyyaml
+  - Lines tab gets a "Save line" button that appends directly to config.yml (no more copy-paste YAML)
+  - After save, UI shows "Restart the container to apply changes"
+  - **Why**: TrueNAS questions.yaml was stripped down to bare minimum (host/creds/GPU/storage). All camera + AI config is done through the web UI instead.
+- [ ] **Zero-camera startup** — `main.py` needs to handle `cameras: []` gracefully (run the web tool only, skip adoption + camera workers, wait for user to add cameras via UI and restart)
+- [ ] Commit + push the web UI expansion + main.py zero-camera handling
+
+### Key design decision (current session)
+
+**TrueNAS app philosophy**: The TrueNAS install wizard asks for just enough to get the container running (Protect host, credentials, storage path, Intel GPU toggle, web port). Everything else — cameras, RTSP URLs, AI model, confidence thresholds, detection toggles, virtual lines — is configured through the embedded web UI at `:8091`. This keeps the TrueNAS form simple (5 fields) and means the same UI works for standalone Docker and TrueNAS users.
+
+Flow:
+1. Install TrueNAS app → wizard seeds config.yml with unifi section + web_tool enabled
+2. Container starts in web-only mode (no cameras yet)
+3. User opens `http://<host>:8091/` → Setup tab → adds cameras → saves
+4. User restarts container → cameras start, detection begins
+5. User returns to Lines tab → draws virtual lines → saves → restarts
 
 ---
 

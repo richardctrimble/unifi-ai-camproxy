@@ -9,6 +9,9 @@
 # Everything else — adoption token, fake MAC address, local IP, and even
 # accepting the camera in the Protect UI — is handled automatically, all
 # against your local UniFi controller. No external services are contacted.
+#
+# All AI + line-crossing settings live in this file, under each camera's
+# `ai:` block. Edit them here and `docker compose restart` to apply.
 # ─────────────────────────────────────────────────────────────────────────────
 
 unifi:
@@ -31,6 +34,7 @@ web_tool:
   port: 8091
 
 cameras:
+  # ── Camera 1: full example with all options ─────────────────────────────
   - name: "Front Door"
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
     snapshot_url: "http://192.168.1.50/snapshot.jpg"   # optional
@@ -42,55 +46,76 @@ cameras:
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
 
-      # Inference device. "auto" is the right answer for almost
-      # everyone — it probes what's reachable and picks the fastest:
-      #   cuda → intel:gpu → intel:npu → mps → cpu
+      # Inference device. "auto" probes what's reachable and picks the
+      # fastest: cuda → intel:gpu → intel:npu → mps → cpu.
       #
-      # Force a specific target here if you want to override the probe:
-      #   cpu        — force CPU
-      #   cuda       — NVIDIA GPU (needs Dockerfile.cuda image — build
-      #                via docker-compose.gpu.yml)
-      #   mps        — Apple Silicon (bare-metal, not inside Docker)
-      #   intel:gpu  — Intel integrated / discrete GPU via OpenVINO
-      #                (default image ships OpenVINO; add
-      #                docker-compose.intel.yml for /dev/dri passthrough)
-      #   intel:cpu  — OpenVINO on Intel CPU (often faster than native
-      #                PyTorch CPU, especially for N100-class chips)
+      # Force a specific target if you want:
+      #   cpu        — force CPU (PyTorch native)
+      #   cuda       — NVIDIA GPU (needs Dockerfile.cuda via docker-compose.gpu.yml)
+      #   mps        — Apple Silicon (bare-metal only, not Docker)
+      #   intel:gpu  — Intel iGPU / dGPU via OpenVINO (add docker-compose.intel.yml)
+      #   intel:cpu  — Intel CPU via OpenVINO (often faster than native PyTorch)
       #   intel:npu  — Meteor Lake / Arrow Lake NPU via OpenVINO
-      #
-      # Note: the default image carries CPU torch + OpenVINO, so
-      # intel:* works out of the box once /dev/dri is exposed. For
-      # NVIDIA CUDA you need the separate Dockerfile.cuda image.
       device: "auto"
 
-      # Confidence thresholds.
-      #   `confidence` is the fallback — used if you don't set a
-      #   per-class override below.
-      #   Vehicles usually want a stricter threshold than people
-      #   because YOLO flips between car/truck/bus around ~0.5.
+      # Confidence thresholds (0.0 – 1.0).
+      #   `confidence` is the fallback — used for any class that doesn't
+      #   have its own override.
+      #   Vehicles usually want a stricter threshold than people because
+      #   YOLO flips between car/truck/bus around ~0.5.
       confidence: 0.50
       confidence_person: 0.45
       confidence_vehicle: 0.60
 
       detect_persons: true
       detect_vehicles: true
-      frame_skip: 3            # analyse every 3rd frame (lower = more CPU)
+      frame_skip: 3            # analyse every Nth frame (lower = more CPU)
 
-      # Virtual lines — optional. Coordinates are normalised 0.0 to 1.0
-      # where (0,0) is top-left of the frame.
+      # Virtual line crossing — optional. Coordinates are normalised
+      # 0.0 to 1.0 where (0,0) is top-left of the frame and (1,1) is
+      # bottom-right. Use the web tool at http://<host>:8091/ to draw
+      # lines visually rather than eyeballing coordinates.
       lines:
-        - name: "EntryLine"
+        - name: "FrontPath"
           x1: 0.5
           y1: 0.0
           x2: 0.5
           y2: 1.0
-          # both | left_to_right | right_to_left | top_to_bottom | bottom_to_top
+          # Direction filter for crossings:
+          #   both           — any crossing triggers
+          #   left_to_right  — centroid moved in +x direction
+          #   right_to_left  — centroid moved in -x direction
+          #   top_to_bottom  — centroid moved in +y direction (down)
+          #   bottom_to_top  — centroid moved in -y direction (up)
           direction: "both"
 
-  # Add more cameras — mac/ip will be auto-generated:
-  # - name: "Backyard"
-  #   rtsp_url: "rtsp://..."
-  #   ai:
-  #     confidence: 0.45
-  #     detect_persons: true
-  #     detect_vehicles: false
+  # ── Camera 2: minimal — just name + rtsp_url ───────────────────────────
+  # MAC and IP are auto-generated. AI defaults apply (yolov8n, auto device,
+  # persons + vehicles, 0.45 confidence). No lines.
+  - name: "Backyard"
+    rtsp_url: "rtsp://admin:password@192.168.1.51:554/stream1"
+
+  # ── Camera 3: vehicles only, custom thresholds, two lines ──────────────
+  - name: "Driveway"
+    rtsp_url: "rtsp://admin:password@192.168.1.52:554/stream1"
+    ai:
+      model: "yolov8s.pt"      # slightly better at vehicles than yolov8n
+      confidence_vehicle: 0.55
+      detect_persons: false     # ignore people on this camera
+      detect_vehicles: true
+      frame_skip: 2             # check more frames for fast-moving cars
+
+      lines:
+        - name: "GateEntry"
+          x1: 0.1
+          y1: 0.5
+          x2: 0.9
+          y2: 0.5
+          direction: "top_to_bottom"   # vehicle drove towards house
+
+        - name: "GateExit"
+          x1: 0.1
+          y1: 0.5
+          x2: 0.9
+          y2: 0.5
+          direction: "bottom_to_top"   # vehicle drove away from house

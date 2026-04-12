@@ -1,0 +1,41 @@
+# Keep the build context lean — only ship what the Dockerfile needs.
+.git
+.gitignore
+.dockerignore
+.vscode
+.idea
+
+# Docs (not needed at runtime)
+SECONDBRAIN.md
+README.md
+LICENSE
+
+# Compose overrides (build reads them, but they're not COPY'd)
+docker-compose*.yml
+
+# Python artefacts
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+
+# Config secrets (user's real config.yml)
+config/config.yml
+config/client.pem
+
+# OpenVINO model cache (generated at runtime under /config)
+config/*_openvino_model/
+
+# YOLO weights (downloaded on first run inside the image)
+*.pt
+*.onnx
+
+# Snapshots / temp
+*.jpg
+*.jpeg
+*.png
+tmp/
+
+# OS junk
+.DS_Store
+Thumbs.db
