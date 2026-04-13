@@ -10,10 +10,8 @@ Protocol notes (from unifi-cam-proxy reverse engineering):
 
 import asyncio
 import logging
-import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +71,18 @@ class AIPortCamera(UnifiCamBase):
     async def get_stream_source(self, stream_index: str) -> str:
         """All stream qualities point at the same RTSP source."""
         return self.rtsp_url
+
+    async def fetch_to_file(self, url: str, dest: Path) -> bool:
+        """Download a URL to a local file. Returns True on success."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        dest.write_bytes(await resp.read())
+                        return True
+        except Exception:
+            self.logger.debug("fetch_to_file failed for %s", url, exc_info=True)
+        return False
 
     # ─── Background AI loop ─────────────────────────────────────────────────
 

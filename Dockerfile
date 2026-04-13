@@ -64,7 +64,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy our source + entrypoint
-COPY docker-entrypoint.sh /app/
+COPY docker-entrypoint.py /app/
 COPY src/ /app/src/
 
 # Pre-download YOLOv8n model so first run is fast
@@ -82,4 +82,4 @@ WORKDIR /app/src
 # Entrypoint: if config.yml exists, use it directly. If UNIFI_HOST env var
 # is set (TrueNAS app mode), generate config.yml from env vars. This keeps
 # backward compat for standalone Docker users who mount their own config.
-ENTRYPOINT ["python", "/app/docker-entrypoint.sh"]
+ENTRYPOINT ["python", "/app/docker-entrypoint.py"]

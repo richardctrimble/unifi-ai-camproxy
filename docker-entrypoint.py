@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-docker-entrypoint.sh (runs as Python)
+docker-entrypoint.py (runs as Python)
 
 Bridges TrueNAS Scale (or any orchestrator that passes env vars) into
 the config.yml format the app expects.

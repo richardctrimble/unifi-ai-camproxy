@@ -9,6 +9,7 @@ Detection lifecycle:
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -103,7 +104,7 @@ class AIEngine:
 
         self._tracked: dict[str, TrackedObject] = {}  # id → TrackedObject
         self._next_id = 0
-        self._detection_queue: asyncio.Queue = asyncio.Queue()
+        self._detection_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
         # Virtual line crossing — lives here so we can check per-frame
         # against the freshly-updated centroid pair on each tracked object.
@@ -239,7 +240,7 @@ class AIEngine:
                 # ultralytics writes the export next to the source .pt;
                 # we move it to /config so it persists across rebuilds.
                 exported = tmp.export(format="openvino")
-                _Path(exported).rename(cache_dir)
+                shutil.move(str(exported), str(cache_dir))
 
             self.logger.info("Loading OpenVINO model from %s", cache_dir)
             model = YOLO(str(cache_dir))
@@ -445,7 +446,13 @@ class AIEngine:
         try:
             tmp = Path(tempfile.NamedTemporaryFile(suffix=".jpg", delete=False).name)
             cv2.imwrite(str(tmp), frame)
+            old = self._snapshot_path
             self._snapshot_path = tmp
+            if old and old.exists():
+                try:
+                    old.unlink()
+                except OSError:
+                    self.logger.debug("Could not remove old snapshot %s", old, exc_info=True)
             return tmp
         except Exception:
             return None
