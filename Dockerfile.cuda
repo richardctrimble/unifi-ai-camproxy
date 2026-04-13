@@ -60,7 +60,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy our source + entrypoint
-COPY docker-entrypoint.sh /app/
+COPY docker-entrypoint.py /app/
 COPY src/ /app/src/
 
 # Pre-download YOLOv8n model so first run is fast
@@ -74,4 +74,4 @@ EXPOSE 8091
 
 WORKDIR /app/src
 
-ENTRYPOINT ["python", "/app/docker-entrypoint.sh"]
+ENTRYPOINT ["python", "/app/docker-entrypoint.py"]
