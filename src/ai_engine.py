@@ -106,6 +106,14 @@ class AIEngine:
         self._next_id = 0
         self._detection_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
+        # Runtime stats — read by the web status endpoint
+        self._frames_captured: int = 0
+        self._frames_analysed: int = 0
+        self._detections_person: int = 0
+        self._detections_vehicle: int = 0
+        self._last_detection_ts: Optional[float] = None
+        self._stream_connected: bool = False
+
         # Virtual line crossing — lives here so we can check per-frame
         # against the freshly-updated centroid pair on each tracked object.
         lines_config = config.get("lines", []) or []
@@ -291,6 +299,16 @@ class AIEngine:
     async def stop(self):
         self._stopped = True
 
+    def reset(self):
+        """Prepare the engine for a new connection cycle.
+
+        Called by AIPortCamera before re-starting the AI loop after a
+        Protect reconnect.  Resets the stop flag so detections() will
+        run again; all other state (tracked objects, counters) is
+        intentionally preserved across reconnects.
+        """
+        self._stopped = False
+
     # ─── Internal capture + inference ───────────────────────────────────────
 
     def _capture_loop(self):
@@ -304,6 +322,7 @@ class AIEngine:
         while not self._stopped:
             ret, frame = cap.read()
             if not ret:
+                self._stream_connected = False
                 self.logger.warning(f"Lost stream, retrying in {reconnect_delay}s...")
                 cap.release()
                 time.sleep(reconnect_delay)
@@ -311,8 +330,10 @@ class AIEngine:
                 reconnect_delay = min(reconnect_delay * 2, 30)
                 continue
 
+            self._stream_connected = True
             reconnect_delay = 2
             frame_count += 1
+            self._frames_captured += 1
             self._latest_frame = frame
 
             if frame_count % self.frame_skip != 0:
@@ -322,6 +343,7 @@ class AIEngine:
             if frame_count % (self.frame_skip * 30) == 0:
                 self._save_snapshot(frame)
 
+            self._frames_analysed += 1
             self._run_inference(frame)
 
         cap.release()

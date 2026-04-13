@@ -71,6 +71,12 @@ cameras:
       detect_vehicles: true
       frame_skip: 3            # analyse every Nth frame (lower = more CPU)
 
+      # Loopback UDP port used internally to share the video1 ffmpeg stream
+      # with the AI engine (single-pull design — one RTSP connection per camera).
+      # Ports are auto-assigned (5200, 5201, …) so you only need this if you
+      # want a deterministic port or have a conflict.  Each camera must be unique.
+      # ai_udp_port: 5200
+
       # Virtual line crossing — optional. Coordinates are normalised
       # 0.0 to 1.0 where (0,0) is top-left of the frame and (1,1) is
       # bottom-right. Use the web tool at http://<host>:8091/ to draw
