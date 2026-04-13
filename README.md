@@ -195,6 +195,7 @@ for a fully commented template with three example cameras.
 | `detect_persons` | `true` | Enable person detection |
 | `detect_vehicles` | `true` | Enable vehicle detection |
 | `frame_skip` | `3` | Analyse every Nth frame (lower = more CPU) |
+| `ai_udp_port` | `5200` (auto) | Loopback UDP port used to share the video1 ffmpeg stream with the AI engine. Ports are auto-assigned per camera (5200, 5201, …). Override when you need deterministic ports or have a firewall rule blocking the default range. Each camera **must** use a unique port. |
 
 ### `cameras[].ai.lines[]` — virtual line crossing
 

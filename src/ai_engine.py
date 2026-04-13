@@ -299,6 +299,16 @@ class AIEngine:
     async def stop(self):
         self._stopped = True
 
+    def reset(self):
+        """Prepare the engine for a new connection cycle.
+
+        Called by AIPortCamera before re-starting the AI loop after a
+        Protect reconnect.  Resets the stop flag so detections() will
+        run again; all other state (tracked objects, counters) is
+        intentionally preserved across reconnects.
+        """
+        self._stopped = False
+
     # ─── Internal capture + inference ───────────────────────────────────────
 
     def _capture_loop(self):
