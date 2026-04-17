@@ -25,7 +25,7 @@ def ensure_cert(path: str = "/config/client.pem") -> str:
         "-out", path,
         "-days", "3650",
         "-nodes",
-        "-subj", "/CN=unifi-ai-port",
+        "-subj", "/CN=unifi-ai-camproxy",
     ], check=True, capture_output=True)
 
     logger.info("Certificate generated OK")

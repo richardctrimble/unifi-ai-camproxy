@@ -50,7 +50,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>happy-ai-port</title>
+  <title>unifi-ai-camproxy</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -141,7 +141,7 @@ INDEX_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <h1>happy-ai-port</h1>
+  <h1>unifi-ai-camproxy</h1>
 
   <div class="tabs">
     <button class="tab active" data-pane="setup">Setup</button>

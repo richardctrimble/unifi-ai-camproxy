@@ -8,8 +8,8 @@ RUN git clone --depth=1 https://github.com/keshavdv/unifi-cam-proxy.git
 # ── Stage 2: final image ──────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-LABEL maintainer="unifi-ai-port"
-LABEL description="DIY UniFi AI Port — person/vehicle detection + line crossing"
+LABEL maintainer="unifi-ai-camproxy"
+LABEL description="DIY UniFi AI camera proxy — person/vehicle detection + line crossing"
 
 # System deps: ffmpeg for video streaming, openssl for cert gen, libGL for OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -42,7 +42,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
-  unifi-ai-port:
+  unifi-ai-camproxy:
     devices:
       - /dev/dri:/dev/dri
     group_add:

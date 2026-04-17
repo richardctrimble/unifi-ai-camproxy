@@ -13,12 +13,12 @@ version: "3.8"
 #   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
 
 services:
-  unifi-ai-port:
+  unifi-ai-camproxy:
     build:
       context: .
       dockerfile: Dockerfile
-    image: unifi-ai-port:latest
-    container_name: unifi-ai-port
+    image: unifi-ai-camproxy:latest
+    container_name: unifi-ai-camproxy
     restart: unless-stopped
     network_mode: host          # needs host network to reach Protect & cameras
     volumes:

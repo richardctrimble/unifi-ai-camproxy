@@ -15,8 +15,8 @@
 #   - `deploy.resources.reservations.devices` reserves the GPU for the
 #     container. Without this, torch still imports but `cuda.is_available()`
 #     returns False and AIEngine falls back to cpu.
-#   - Tags the image as unifi-ai-port:cuda so it doesn't clobber the
-#     default unifi-ai-port:latest tag.
+#   - Tags the image as unifi-ai-camproxy:cuda so it doesn't clobber the
+#     default unifi-ai-camproxy:latest tag.
 #
 # Once running, check `docker compose logs -f` — AIEngine logs its chosen
 # device on startup ("Running inference on: cuda"). If you see "cpu" there,
@@ -24,10 +24,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
-  unifi-ai-port:
+  unifi-ai-camproxy:
     build:
       dockerfile: Dockerfile.cuda
-    image: unifi-ai-port:cuda
+    image: unifi-ai-camproxy:cuda
     deploy:
       resources:
         reservations:
