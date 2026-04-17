@@ -1,4 +1,4 @@
-# TrueNAS Scale — "Install via YAML" Docker Compose for unifi-ai-port.
+# TrueNAS Scale — "Install via YAML" Docker Compose for unifi-ai-camproxy.
 #
 # How to use:
 #   1. In TrueNAS web UI: Apps > Discover Apps > Custom App > Install via YAML
@@ -11,13 +11,13 @@
 # This compose file only needs your Protect credentials and a storage path.
 
 services:
-  unifi-ai-port:
-    image: ghcr.io/richardctrimble/unifi-ai-port:latest
+  unifi-ai-camproxy:
+    image: ghcr.io/richardctrimble/unifi-ai-camproxy:latest
     restart: unless-stopped
     network_mode: host
     volumes:
-      # CHANGE ME: set to a TrueNAS dataset path, e.g. /mnt/pool/apps/unifi-ai-port
-      - /mnt/pool/apps/unifi-ai-port:/config
+      # CHANGE ME: set to a TrueNAS dataset path, e.g. /mnt/pool/apps/unifi-ai-camproxy
+      - /mnt/pool/apps/unifi-ai-camproxy:/config
     environment:
       - PYTHONUNBUFFERED=1
       # CHANGE ME: IP of your UDM / UDM Pro / UNVR

@@ -1,4 +1,4 @@
-# happy-ai-port — Second Brain
+# unifi-ai-camproxy — Second Brain
 
 Everything we know, decided, and built. Pick this up in Claude Code and continue seamlessly.
 
@@ -112,7 +112,7 @@ Each needs a unique fake MAC address.
 ## File structure
 
 ```
-happy-ai-port/
+unifi-ai-camproxy/
 ├── Dockerfile                  # Default: CPU torch + OpenVINO + Intel runtime (~1.5GB)
 ├── Dockerfile.cuda             # NVIDIA variant: CUDA 12.1 PyTorch wheel (~2.5GB)
 ├── docker-compose.yml          # Builds default Dockerfile; host network + /config mount
@@ -291,12 +291,12 @@ cameras:
 - [x] Universal device auto-detection (`ai.device: auto`) — probes every runtime that's reachable and picks the fastest in order: `cuda → intel:gpu → intel:npu → mps → cpu`. Logs the winner on startup.
 - [x] Split image strategy: default `Dockerfile` (~1.5GB) ships CPU torch + OpenVINO + Intel compute runtime — covers CPU and Intel iGPU/dGPU/NPU hosts in a single build. Sibling `Dockerfile.cuda` (~2.5GB) swaps in the CUDA 12.1 PyTorch wheel for NVIDIA hosts. Split keeps each image targeted instead of shipping 3.5GB of runtimes nobody uses.
 - [x] `docker-compose.intel.yml` just passes through `/dev/dri` — no rebuild needed, the default image already has OpenVINO. Auto-exports YOLOv8 to OpenVINO IR format on first run and caches under `/config/<model>_openvino_model/`. Targets N100 hardware recommendation — 2–3× CPU throughput on integrated UHD.
-- [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-port:cuda` so it doesn't collide with the default tag.
+- [x] `docker-compose.gpu.yml` swaps the build to `Dockerfile.cuda` and reserves the NVIDIA device. Tags the CUDA image as `unifi-ai-camproxy:cuda` so it doesn't collide with the default tag.
 - [x] TrueNAS Scale Docker Compose YAML (`truenas/docker-compose.yaml`) — ready-to-paste into TrueNAS 24.10+ "Install via YAML" feature. User edits 4 values (host, creds, storage path), docker-entrypoint.sh generates a seed config.yml from env vars. All camera and AI configuration moves to the web UI. (Old Helm chart catalog removed — TrueNAS 24.10+ dropped custom catalog support entirely.)
 - [x] `.dockerignore` — keeps .git, __pycache__, SECONDBRAIN, secrets out of the Docker build context
 - [x] Multi-camera config example (3 cameras: full options, minimal, vehicles-only with two lines)
 - [x] Full config reference tables in README + troubleshooting section
-- [x] Git repo live at github.com/richardctrimble/happy-ai-port
+- [x] Git repo live at github.com/richardctrimble/unifi-ai-camproxy
 
 ### Recently completed
 
@@ -381,7 +381,7 @@ YOLO model sizing:
 - Decided to build on unifi-cam-proxy's protocol layer + add our own YOLO inference
 - User: x86 Docker, person/vehicle + line crossing, some Python experience
 - Built full project: 5 Python source files + Dockerfile + docker-compose + config
-- Initialised git, pushed to github.com/richardctrimble/happy-ai-port
+- Initialised git, pushed to github.com/richardctrimble/unifi-ai-camproxy
 - User on iPad, private repo — pushed via PAT (token should be rotated after use)
 - User asked to automate the adoption process as much as possible, avoiding
   third-party services. Added `src/unifi_auth.py` + `src/auto_config.py` and

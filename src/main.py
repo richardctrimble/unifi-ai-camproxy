@@ -21,7 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("ai-port")
+logger = logging.getLogger("camproxy")
 
 
 def load_config(path: str = "/config/config.yml") -> dict:

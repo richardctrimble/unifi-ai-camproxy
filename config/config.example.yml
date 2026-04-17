@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# unifi-ai-port configuration
+# unifi-ai-camproxy configuration
 #
 # The only things you *have* to fill in are:
 #   * unifi.host

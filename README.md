@@ -1,6 +1,6 @@
-# unifi-ai-port
+# unifi-ai-camproxy
 
-A DIY UniFi AI Port — runs on any x86 machine, spoofs as a UniFi camera in
+A DIY UniFi AI camera proxy — runs on any x86 machine, spoofs as a UniFi camera in
 Protect, and injects real-time person/vehicle detections and virtual line
 crossing events from your own RTSP cameras.
 
@@ -27,8 +27,8 @@ thumbnails, timeline events).
 ### 1. Clone
 
 ```bash
-git clone https://github.com/richardctrimble/happy-ai-port.git
-cd happy-ai-port
+git clone https://github.com/richardctrimble/unifi-ai-camproxy.git
+cd unifi-ai-camproxy
 ```
 
 ### 2. Configure
@@ -91,16 +91,16 @@ covers the majority of setups. Building is handled automatically by
 
 ```bash
 # Default image (CPU + Intel OpenVINO)
-docker build -t unifi-ai-port:latest .
+docker build -t unifi-ai-camproxy:latest .
 
 # NVIDIA CUDA variant (~2.5GB) — for hosts with an NVIDIA GPU
-docker build -f Dockerfile.cuda -t unifi-ai-port:cuda .
+docker build -f Dockerfile.cuda -t unifi-ai-camproxy:cuda .
 ```
 
 | Image | Dockerfile | Size | Covers |
 |---|---|---|---|
-| `unifi-ai-port:latest` | `Dockerfile` | ~1.5GB | CPU, Intel iGPU/dGPU/NPU, Apple MPS |
-| `unifi-ai-port:cuda` | `Dockerfile.cuda` | ~2.5GB | NVIDIA CUDA + CPU fallback |
+| `unifi-ai-camproxy:latest` | `Dockerfile` | ~1.5GB | CPU, Intel iGPU/dGPU/NPU, Apple MPS |
+| `unifi-ai-camproxy:cuda` | `Dockerfile.cuda` | ~2.5GB | NVIDIA CUDA + CPU fallback |
 
 ## Acceleration
 
@@ -302,7 +302,7 @@ A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
 ### Prerequisites
 
 - TrueNAS Scale **24.10 (Electric Eel)** or newer
-- A dataset for persistent config (e.g. create `apps/unifi-ai-port`
+- A dataset for persistent config (e.g. create `apps/unifi-ai-camproxy`
   under your pool)
 - Your UniFi Protect controller IP and a local account (username + password)
 
@@ -316,7 +316,7 @@ A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
 6. Paste the contents of `truenas/docker-compose.yaml` into the editor
    (or copy it from below)
 7. Edit the four `CHANGE ME` values:
-   - **Volume path** — your TrueNAS dataset (e.g. `/mnt/pool/apps/unifi-ai-port`)
+   - **Volume path** — your TrueNAS dataset (e.g. `/mnt/pool/apps/unifi-ai-camproxy`)
    - **UNIFI_HOST** — IP of your UDM / UDM Pro / UNVR
    - **UNIFI_USERNAME** — local Protect account username
    - **UNIFI_PASSWORD** — local Protect account password
@@ -329,13 +329,13 @@ A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
 
 ```yaml
 services:
-  unifi-ai-port:
-    image: ghcr.io/richardctrimble/unifi-ai-port:latest
+  unifi-ai-camproxy:
+    image: ghcr.io/richardctrimble/unifi-ai-camproxy:latest
     restart: unless-stopped
     network_mode: host
     volumes:
       # CHANGE ME: set to a TrueNAS dataset path
-      - /mnt/pool/apps/unifi-ai-port:/config
+      - /mnt/pool/apps/unifi-ai-camproxy:/config
     environment:
       - PYTHONUNBUFFERED=1
       # CHANGE ME: IP of your UDM / UDM Pro / UNVR
@@ -366,7 +366,7 @@ On first boot the container starts in **web-only mode** (no cameras yet).
    - **Name** — what this camera will be called in Protect
    - **RTSP URL** — the camera's RTSP stream address
    - Adjust AI settings if needed (model, confidence, frame skip, etc.)
-4. Add more cameras if you want (up to ~5 per AI Port, depending on hardware)
+4. Add more cameras if you want (up to ~5 per instance, depending on hardware)
 5. Click **Save All**
 6. Go back to TrueNAS and **restart the app** (Apps > your app > Restart)
 
@@ -410,8 +410,8 @@ via SSH:
 
 ```bash
 ssh root@<truenas-ip>
-mkdir -p /mnt/pool/apps/unifi-ai-port
-cd /mnt/pool/apps/unifi-ai-port
+mkdir -p /mnt/pool/apps/unifi-ai-camproxy
+cd /mnt/pool/apps/unifi-ai-camproxy
 # copy docker-compose.yaml here and edit it, then:
 docker compose up -d
 ```
