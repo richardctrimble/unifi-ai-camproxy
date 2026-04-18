@@ -64,7 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
      && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] \
         https://repositories.intel.com/graphics/ubuntu noble main" \
         > /etc/apt/sources.list.d/intel-graphics.list \
-     && apt-get update && apt-get install -y --no-install-recommends \
+        ocl-icd-libopencl1 \
+     && rm -f /etc/apt/sources.list.d/intel-graphics.list \
+        /etc/apt/trusted.gpg.d/intel-graphics.gpg \
         intel-opencl-icd \
         libze1 \
         ocl-icd-libopencl1 \
