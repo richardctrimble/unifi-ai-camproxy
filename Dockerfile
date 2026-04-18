@@ -56,9 +56,16 @@ RUN pip install --no-cache-dir \
       torch torchvision
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget gnupg \
+     && wget -qO - https://repositories.intel.com/graphics/intel-graphics.key | \
+        gpg --dearmor -o /etc/apt/trusted.gpg.d/intel-graphics.gpg \
+     && echo "deb https://repositories.intel.com/graphics/ubuntu bookworm main" \
+        > /etc/apt/sources.list.d/intel-graphics.list \
+     && apt-get update && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
         libze1 \
         ocl-icd-libopencl1 \
+     && apt-get purge -y --auto-remove wget gnupg \
      && rm -rf /var/lib/apt/lists/* \
      && pip install --no-cache-dir "openvino>=2024.0.0"
 
