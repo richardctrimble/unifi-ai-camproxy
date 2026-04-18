@@ -27,7 +27,7 @@ WORKDIR /app
 COPY --from=proxy-builder /build/unifi-cam-proxy /app/unifi-cam-proxy
 RUN for file in requirements.txt setup.cfg setup.py; do \
         path="/app/unifi-cam-proxy/$file"; \
-        [ -f "$path" ] && sed -i '/pyunifiprotect/d' "$path"; \
+        if [ -f "$path" ]; then sed -i '/pyunifiprotect/d' "$path"; fi; \
     done
 RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
 
