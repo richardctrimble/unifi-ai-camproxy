@@ -45,7 +45,9 @@ WORKDIR /app
 
 # Copy unifi-cam-proxy (we use its base classes directly)
 COPY --from=proxy-builder /build/unifi-cam-proxy /app/unifi-cam-proxy
-RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
+RUN sed -i '/pyunifiprotect/d' /app/unifi-cam-proxy/setup.cfg 2>/dev/null; \
+    sed -i '/pyunifiprotect/d' /app/unifi-cam-proxy/setup.py 2>/dev/null; \
+    pip install --no-cache-dir -e /app/unifi-cam-proxy
 
 # CUDA 12.1 PyTorch wheel. `cu118` also works for older NVIDIA drivers;
 # override with --build-arg CUDA_FLAVOR=cu118.
