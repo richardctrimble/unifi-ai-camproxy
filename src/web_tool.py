@@ -14,6 +14,7 @@ Endpoints:
     GET  /api/lines/<name>       existing lines for a camera
     POST /api/lines/<name>       save a new line to a camera's config
     DELETE /api/lines/<name>/<idx>  remove a line by index
+    POST /api/test-rtsp          test an RTSP URL (returns {"ok": bool, "message": str})
 
 After saving, the UI shows "Restart the container to apply changes."
 """
@@ -87,6 +88,7 @@ INDEX_HTML = r"""<!doctype html>
     button:active { background: #444; }
     label { font-size: 13px; color: #aaa; display: block; margin-bottom: 4px; }
     .hint { color: #888; font-size: 13px; margin: 8px 0 12px 0; }
+    .example { font-size: 11px; color: #666; margin-top: 2px; }
 
     /* Cards */
     .card {
@@ -236,15 +238,22 @@ function createCameraCard(cam, idx) {
     <div class="grid">
       <div class="field">
         <label>Name</label>
-        <input data-key="name" value="${esc(cam.name || '')}">
+        <input data-key="name" value="${esc(cam.name || '')}" placeholder="e.g. Front Door">
+        <div class="example">e.g. Front Door</div>
       </div>
       <div class="field">
         <label>RTSP URL</label>
-        <input data-key="rtsp_url" value="${esc(cam.rtsp_url || '')}">
+        <div class="field-row">
+          <input data-key="rtsp_url" value="${esc(cam.rtsp_url || '')}" placeholder="e.g. rtsp://192.168.1.100:7447/abcdef123456_1" style="flex:1;">
+          <button class="btn-sm test-rtsp-btn" type="button">Test RTSP</button>
+        </div>
+        <div class="example">e.g. rtsp://192.168.1.100:7447/abcdef123456_1</div>
+        <div class="rtsp-status" style="font-size:12px;margin-top:3px;"></div>
       </div>
       <div class="field">
         <label>Snapshot URL (optional)</label>
-        <input data-key="snapshot_url" value="${esc(cam.snapshot_url || '')}">
+        <input data-key="snapshot_url" value="${esc(cam.snapshot_url || '')}" placeholder="e.g. http://192.168.1.100/snap.jpeg">
+        <div class="example">e.g. http://192.168.1.100/snap.jpeg</div>
       </div>
       <div class="field">
         <label>Model</label>
@@ -256,11 +265,13 @@ function createCameraCard(cam, idx) {
       </div>
       <div class="field">
         <label>Confidence</label>
-        <input data-key="ai.confidence" type="number" min="0" max="1" step="0.05" value="${ai.confidence ?? 0.45}">
+        <input data-key="ai.confidence" type="number" min="0" max="1" step="0.05" value="${ai.confidence ?? 0.45}" placeholder="e.g. 0.45">
+        <div class="example">e.g. 0.45 (range 0–1)</div>
       </div>
       <div class="field">
         <label>Frame Skip</label>
-        <input data-key="ai.frame_skip" type="number" min="1" max="30" value="${ai.frame_skip ?? 3}">
+        <input data-key="ai.frame_skip" type="number" min="1" max="30" value="${ai.frame_skip ?? 3}" placeholder="e.g. 3">
+        <div class="example">e.g. 3 (process every Nth frame)</div>
       </div>
       <div class="field">
         <label class="field-row">
@@ -274,10 +285,42 @@ function createCameraCard(cam, idx) {
           Detect Vehicles
         </label>
       </div>
+      <div class="field">
+        <label class="field-row">
+          <input type="checkbox" data-key="disabled" ${cam.disabled ? 'checked' : ''}>
+          Disabled (skip this camera on startup)
+        </label>
+      </div>
     </div>`;
   card.querySelector('.remove-cam').addEventListener('click', () => {
     cameraData.splice(idx, 1);
     renderCameras();
+  });
+  card.querySelector('.test-rtsp-btn').addEventListener('click', async () => {
+    const rtspInput = card.querySelector('[data-key="rtsp_url"]');
+    const statusDiv = card.querySelector('.rtsp-status');
+    const rtspUrl = rtspInput.value.trim();
+    if (!rtspUrl) { statusDiv.textContent = 'Enter an RTSP URL first.'; statusDiv.style.color = '#f87'; return; }
+    statusDiv.textContent = 'Testing…';
+    statusDiv.style.color = '#aaa';
+    try {
+      const resp = await fetch('/api/test-rtsp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rtsp_url: rtspUrl }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        statusDiv.textContent = '✓ ' + (data.message || 'Stream reachable');
+        statusDiv.style.color = '#4c4';
+      } else {
+        statusDiv.textContent = '✗ ' + (data.message || 'Stream unreachable');
+        statusDiv.style.color = '#f87';
+      }
+    } catch (e) {
+      statusDiv.textContent = '✗ Request failed';
+      statusDiv.style.color = '#f87';
+    }
   });
   return card;
 }
@@ -528,6 +571,7 @@ class LineTool:
         self.app.router.add_get("/api/lines/{name}", self._get_lines)
         self.app.router.add_post("/api/lines/{name}", self._save_line)
         self.app.router.add_delete("/api/lines/{name}/{idx}", self._delete_line)
+        self.app.router.add_post("/api/test-rtsp", self._test_rtsp)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -624,6 +668,9 @@ class LineTool:
                 )
             if not cam.get("snapshot_url"):
                 cam.pop("snapshot_url", None)
+            # Remove disabled: false to keep config clean (only store disabled: true)
+            if not cam.get("disabled"):
+                cam.pop("disabled", None)
             ai = cam.get("ai", {})
             if ai is not None and not isinstance(ai, dict):
                 return web.Response(
@@ -725,6 +772,43 @@ class LineTool:
         self._write_config()
         logger.info("Deleted line %d from camera '%s'", idx, name)
         return web.json_response({"ok": True})
+
+    async def _test_rtsp(self, request: web.Request) -> web.Response:
+        """Try to open an RTSP stream and read one frame; return ok/message."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid JSON")
+
+        rtsp_url = body.get("rtsp_url", "")
+        if not rtsp_url:
+            return web.json_response({"ok": False, "message": "rtsp_url is required"})
+
+        loop = asyncio.get_event_loop()
+
+        def _check_stream(url: str) -> tuple[bool, str]:
+            cap = cv2.VideoCapture(url)
+            try:
+                if not cap.isOpened():
+                    return False, "Could not open stream"
+                ok, _frame = cap.read()
+                if ok:
+                    return True, "Stream reachable — frame read successfully"
+                return False, "Stream opened but could not read a frame"
+            finally:
+                cap.release()
+
+        try:
+            ok, message = await asyncio.wait_for(
+                loop.run_in_executor(None, _check_stream, rtsp_url),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "message": "Timed out after 10 s"})
+        except Exception as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+
+        return web.json_response({"ok": ok, "message": message})
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
