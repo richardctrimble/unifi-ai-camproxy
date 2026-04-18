@@ -25,7 +25,9 @@ WORKDIR /app
 
 # Copy unifi-cam-proxy (we use its base classes directly)
 COPY --from=proxy-builder /build/unifi-cam-proxy /app/unifi-cam-proxy
-RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
+RUN sed -i '/pyunifiprotect/d' /app/unifi-cam-proxy/setup.cfg 2>/dev/null; \
+    sed -i '/pyunifiprotect/d' /app/unifi-cam-proxy/setup.py 2>/dev/null; \
+    pip install --no-cache-dir -e /app/unifi-cam-proxy
 
 # ── Default runtime image (CPU + Intel OpenVINO) ─────────────────────────────
 # This image ships CPU PyTorch + OpenVINO + the Intel compute runtime, so
