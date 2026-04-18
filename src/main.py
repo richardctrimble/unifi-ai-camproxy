@@ -193,11 +193,18 @@ async def main():
     local_ip = detect_local_ip()
     logger.info("Detected local IP: %s", local_ip)
     for cam in cameras:
+        if cam.get("disabled"):
+            logger.info("Skipping disabled camera: %s", cam.get("name", "<unnamed>"))
+            continue
         fill_camera_defaults(cam, local_ip)
 
     # 4. Start all camera workers + the background auto-adopt task
-    tasks.extend(asyncio.create_task(run_camera(cam, cfg, token)) for cam in cameras)
-    tasks.append(asyncio.create_task(auto_adopt_pending(cfg, cameras)))
+    tasks.extend(
+        asyncio.create_task(run_camera(cam, cfg, token))
+        for cam in cameras
+        if not cam.get("disabled")
+    )
+    tasks.append(asyncio.create_task(auto_adopt_pending(cfg, [c for c in cameras if not c.get("disabled")])))
 
     await asyncio.gather(*tasks, return_exceptions=False)
 
