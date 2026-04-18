@@ -59,7 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget \
         gnupg \
      && mkdir -p /etc/apt/keyrings \
-     && wget -qO- https://repositories.intel.com/graphics/intel-graphics.key \
+     && echo "deb https://repositories.intel.com/graphics/ubuntu noble main" \
         | gpg --dearmor -o /etc/apt/keyrings/intel-graphics.gpg \
      && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] \
         https://repositories.intel.com/graphics/ubuntu noble main" \
