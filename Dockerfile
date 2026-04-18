@@ -56,10 +56,13 @@ RUN pip install --no-cache-dir \
       torch torchvision
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget gnupg \
-     && wget -qO - https://repositories.intel.com/graphics/intel-graphics.key | \
-        gpg --dearmor -o /etc/apt/trusted.gpg.d/intel-graphics.gpg \
-     && echo "deb https://repositories.intel.com/graphics/ubuntu bookworm main" \
+        wget \
+        gnupg \
+     && mkdir -p /etc/apt/keyrings \
+     && wget -qO- https://repositories.intel.com/graphics/intel-graphics.key \
+        | gpg --dearmor -o /etc/apt/keyrings/intel-graphics.gpg \
+     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] \
+        https://repositories.intel.com/graphics/ubuntu noble main" \
         > /etc/apt/sources.list.d/intel-graphics.list \
      && apt-get update && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
