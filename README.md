@@ -1,5 +1,7 @@
 # unifi-ai-camproxy
 
+[![Docker](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml)
+
 A DIY UniFi AI camera proxy — runs on any x86 machine, spoofs as a UniFi camera in
 Protect, and injects real-time person/vehicle detections and virtual line
 crossing events from your own RTSP cameras.
@@ -426,6 +428,28 @@ docker compose pull && docker compose up -d
 
 Or in the TrueNAS UI, edit the custom app and re-save to trigger a
 fresh image pull.
+
+## Versioning
+
+This project uses **calendar versioning** in the format `YYYY.M.R`:
+
+| Part | Meaning | Example |
+|------|---------|---------|
+| `YYYY` | Four-digit year | `2026` |
+| `M` | Month (no leading zero) | `4` |
+| `R` | Release number within that month | `1`, `2`, `3`, … |
+
+Example tags: `2026.4.1`, `2026.4.2`, `2026.5.1`.
+
+To create a release:
+
+```bash
+git tag 2026.4.1
+git push origin 2026.4.1
+```
+
+This triggers the CI workflow to build and push Docker images tagged with the
+version (e.g. `:2026.4.1` and `:2026.4.1-cuda`).
 
 ## Known limitations
 
