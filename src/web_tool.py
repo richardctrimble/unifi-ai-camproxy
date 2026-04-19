@@ -4,6 +4,7 @@ web_tool.py — embedded web UI for camera configuration and virtual line drawin
 Tabs:
     Setup  — add/edit/remove cameras + per-camera AI settings, save to config.yml
     Lines  — draw virtual crossing lines on live frames, save directly to config.yml
+    Status — live per-camera runtime stats (stream state, frame counts, detections)
 
 Endpoints:
     GET  /                       single-page HTML (tabbed UI)
@@ -15,6 +16,7 @@ Endpoints:
     POST /api/lines/<name>       save a new line to a camera's config
     DELETE /api/lines/<name>/<idx>  remove a line by index
     POST /api/test-rtsp          test an RTSP URL (returns {"ok": bool, "message": str})
+    GET  /api/status             per-camera runtime status (stream, frames, detections)
 
 After saving, the UI shows "Restart the container to apply changes."
 """
@@ -140,6 +142,20 @@ INDEX_HTML = r"""<!doctype html>
     .draft     { stroke: #4af; stroke-width: 3; fill: none; }
     .handle    { fill: #4af; stroke: #fff; stroke-width: 1; }
     .empty-msg { color: #666; font-style: italic; padding: 20px; }
+
+    /* Status table */
+    .status-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .status-table th, .status-table td {
+      padding: 8px 12px; text-align: left; border-bottom: 1px solid #333;
+    }
+    .status-table th { color: #aaa; font-weight: 500; font-size: 13px; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 12px; font-weight: 600;
+    }
+    .badge-ok { background: #166534; color: #4ade80; }
+    .badge-err { background: #7f1d1d; color: #fca5a5; }
+    .badge-wait { background: #78350f; color: #fcd34d; }
   </style>
 </head>
 <body>
@@ -148,6 +164,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="tabs">
     <button class="tab active" data-pane="setup">Setup</button>
     <button class="tab" data-pane="lines">Lines</button>
+    <button class="tab" data-pane="status">Status</button>
   </div>
 
   <!-- ═══ SETUP TAB ═══ -->
@@ -210,6 +227,16 @@ INDEX_HTML = r"""<!doctype html>
     <div id="line-list"></div>
   </div>
 
+  <!-- ═══ STATUS TAB ═══ -->
+  <div id="status" class="pane">
+    <div class="hint">
+      Live camera status — auto-refreshes every 3 seconds while this tab is active.
+    </div>
+    <div id="status-content">
+      <div class="empty-msg">Loading status…</div>
+    </div>
+  </div>
+
 <script>
 /* ── Tab switching ─────────────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(t => {
@@ -219,6 +246,8 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     document.getElementById(t.dataset.pane).classList.add('active');
     if (t.dataset.pane === 'lines') loadLineCameras();
+    if (t.dataset.pane === 'status') startStatusPolling();
+    if (t.dataset.pane !== 'status') stopStatusPolling();
   });
 });
 
@@ -530,6 +559,68 @@ window.deleteLine = async function(idx) {
   }
 };
 
+/* ── Status tab ────────────────────────────────────────────────────────── */
+const statusDiv = document.getElementById('status-content');
+let statusTimer = null;
+
+function stopStatusPolling() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+}
+
+function startStatusPolling() {
+  stopStatusPolling();
+  loadStatus();
+  statusTimer = setInterval(loadStatus, 3000);
+}
+
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  const sec = Math.floor(Date.now() / 1000 - ts);
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  return Math.floor(sec / 3600) + 'h ago';
+}
+
+async function loadStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    const cams = data.cameras || [];
+    if (!cams.length) {
+      statusDiv.innerHTML = '<div class="empty-msg">No cameras configured.</div>';
+      return;
+    }
+    let html = `<table class="status-table">
+      <thead><tr>
+        <th>Camera</th><th>Stream</th><th>Device</th><th>Model</th>
+        <th>Frames</th><th>Analysed</th>
+        <th>Persons</th><th>Vehicles</th><th>Last Detection</th>
+      </tr></thead><tbody>`;
+    for (const c of cams) {
+      const badge = c.stream_connected
+        ? '<span class="badge badge-ok">Connected</span>'
+        : (c.disabled
+          ? '<span class="badge badge-wait">Disabled</span>'
+          : '<span class="badge badge-err">Disconnected</span>');
+      html += `<tr>
+        <td><strong>${esc(c.name)}</strong></td>
+        <td>${badge}</td>
+        <td>${esc(c.device || '—')}</td>
+        <td>${esc(c.model || '—')}</td>
+        <td>${c.frames_captured ?? '—'}</td>
+        <td>${c.frames_analysed ?? '—'}</td>
+        <td>${c.detections_person ?? '—'}</td>
+        <td>${c.detections_vehicle ?? '—'}</td>
+        <td>${fmtAgo(c.last_detection_ts)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    statusDiv.innerHTML = html;
+  } catch (e) {
+    statusDiv.innerHTML = '<div class="empty-msg">Could not load status.</div>';
+  }
+}
+
 /* ── Init ──────────────────────────────────────────────────────────────── */
 loadConfig();
 </script>
@@ -572,6 +663,7 @@ class LineTool:
         self.app.router.add_post("/api/lines/{name}", self._save_line)
         self.app.router.add_delete("/api/lines/{name}/{idx}", self._delete_line)
         self.app.router.add_post("/api/test-rtsp", self._test_rtsp)
+        self.app.router.add_get("/api/status", self._get_status)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -809,6 +901,38 @@ class LineTool:
             return web.json_response({"ok": False, "message": str(exc)})
 
         return web.json_response({"ok": ok, "message": message})
+
+    async def _get_status(self, request: web.Request) -> web.Response:
+        """Return per-camera runtime status from each AIEngine."""
+        cameras = []
+        for cam_cfg in self.config.get("cameras", []):
+            name = cam_cfg.get("name", "")
+            entry = {"name": name}
+
+            if cam_cfg.get("disabled"):
+                entry["disabled"] = True
+                entry["stream_connected"] = False
+                cameras.append(entry)
+                continue
+
+            cam = self.registry.get(name)
+            if cam is None:
+                entry["stream_connected"] = False
+                cameras.append(entry)
+                continue
+
+            eng = cam.ai_engine
+            entry["stream_connected"] = eng._stream_connected
+            entry["device"] = eng.device
+            entry["model"] = cam_cfg.get("ai", {}).get("model", "yolov8n.pt")
+            entry["frames_captured"] = eng._frames_captured
+            entry["frames_analysed"] = eng._frames_analysed
+            entry["detections_person"] = eng._detections_person
+            entry["detections_vehicle"] = eng._detections_vehicle
+            entry["last_detection_ts"] = eng._last_detection_ts
+            cameras.append(entry)
+
+        return web.json_response({"cameras": cameras})
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
