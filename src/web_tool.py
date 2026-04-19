@@ -2,6 +2,7 @@
 web_tool.py — embedded web UI for camera configuration and virtual line drawing.
 
 Tabs:
+    Status — live dashboard: connection info, inference device, CPU/GPU load, per-camera stats
     Setup  — add/edit/remove cameras + per-camera AI settings, save to config.yml
     Lines  — draw virtual crossing lines on live frames, save directly to config.yml
 
@@ -15,6 +16,7 @@ Endpoints:
     POST /api/lines/<name>       save a new line to a camera's config
     DELETE /api/lines/<name>/<idx>  remove a line by index
     POST /api/test-rtsp          test an RTSP URL (returns {"ok": bool, "message": str})
+    GET  /api/status             live system status JSON (polled by the Status tab)
 
 After saving, the UI shows "Restart the container to apply changes."
 """
@@ -25,6 +27,8 @@ import asyncio
 import copy
 import logging
 import os
+import platform
+import time
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
@@ -140,18 +144,67 @@ INDEX_HTML = r"""<!doctype html>
     .draft     { stroke: #4af; stroke-width: 3; fill: none; }
     .handle    { fill: #4af; stroke: #fff; stroke-width: 1; }
     .empty-msg { color: #666; font-style: italic; padding: 20px; }
+
+    /* Status tab */
+    .status-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px;
+    }
+    .status-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #2a2a2a; }
+    .status-label { color: #888; font-size: 13px; }
+    .status-value { font-size: 14px; font-weight: 500; text-align: right; }
+    .cam-row {
+      display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 8px;
+      padding: 8px 0; border-bottom: 1px solid #2a2a2a; font-size: 13px; align-items: center;
+    }
+    .cam-row.header { color: #888; font-weight: 600; border-bottom: 1px solid #444; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot.on  { background: #4c4; }
+    .dot.off { background: #f44; }
+    .dot.disabled { background: #666; }
+    @media (max-width: 600px) {
+      .status-grid { grid-template-columns: 1fr; }
+      .cam-row { grid-template-columns: 1fr 1fr; }
+    }
   </style>
 </head>
 <body>
   <h1>unifi-ai-camproxy</h1>
 
   <div class="tabs">
-    <button class="tab active" data-pane="setup">Setup</button>
+    <button class="tab active" data-pane="status">Status</button>
+    <button class="tab" data-pane="setup">Setup</button>
     <button class="tab" data-pane="lines">Lines</button>
   </div>
 
+  <!-- ═══ STATUS TAB ═══ -->
+  <div id="status" class="pane active">
+    <div class="card">
+      <div class="card-header"><h3>System</h3></div>
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">UniFi Host</span><span id="s-host" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Python</span><span id="s-python" class="status-value">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Inference</h3></div>
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">Device</span><span id="s-device" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">CPU Load (1m)</span><span id="s-cpu" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU</span><span id="s-gpu" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU Utilization</span><span id="s-gpu-util" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU Memory</span><span id="s-gpu-mem" class="status-value">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Cameras</h3></div>
+      <div id="s-cameras"><span class="empty-msg">Loading…</span></div>
+    </div>
+  </div>
+
   <!-- ═══ SETUP TAB ═══ -->
-  <div id="setup" class="pane active">
+  <div id="setup" class="pane">
     <div id="save-banner" class="banner">
       Configuration saved. <strong>Restart the container</strong> to apply changes.
     </div>
@@ -219,8 +272,92 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     document.getElementById(t.dataset.pane).classList.add('active');
     if (t.dataset.pane === 'lines') loadLineCameras();
+    if (t.dataset.pane === 'status') refreshStatus();
   });
 });
+
+/* ── Status tab ────────────────────────────────────────────────────────── */
+let statusTimer = null;
+
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+
+async function refreshStatus() {
+  try {
+    const data = await (await fetch('/api/status')).json();
+
+    document.getElementById('s-host').textContent = data.unifi_host || '—';
+    document.getElementById('s-user').textContent = data.unifi_username || '—';
+    document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
+    document.getElementById('s-python').textContent = data.python_version || '—';
+
+    // Inference
+    const dev = data.inference_device || 'N/A';
+    const devEl = document.getElementById('s-device');
+    devEl.textContent = dev;
+    if (dev.startsWith('cuda')) devEl.style.color = '#4c4';
+    else if (dev.startsWith('intel:gpu')) devEl.style.color = '#4af';
+    else if (dev === 'cpu') devEl.style.color = '#fa4';
+    else devEl.style.color = '';
+
+    document.getElementById('s-cpu').textContent = data.cpu_load != null ? data.cpu_load.toFixed(2) : '—';
+
+    // GPU
+    const gpu = data.gpu || {};
+    if (gpu.name) {
+      document.getElementById('s-gpu').textContent = gpu.name;
+      document.getElementById('s-gpu-util').textContent = gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '—';
+      document.getElementById('s-gpu-mem').textContent = (gpu.memory_used_mb != null && gpu.memory_total_mb != null)
+        ? gpu.memory_used_mb + ' / ' + gpu.memory_total_mb + ' MB' : '—';
+    } else if (gpu.devices) {
+      document.getElementById('s-gpu').textContent = 'OpenVINO: ' + gpu.devices.join(', ');
+      document.getElementById('s-gpu-util').textContent = '—';
+      document.getElementById('s-gpu-mem').textContent = '—';
+    } else {
+      document.getElementById('s-gpu').textContent = 'None detected';
+      document.getElementById('s-gpu-util').textContent = '—';
+      document.getElementById('s-gpu-mem').textContent = '—';
+    }
+
+    // Cameras
+    const camDiv = document.getElementById('s-cameras');
+    const cams = data.cameras || [];
+    if (!cams.length) {
+      camDiv.innerHTML = '<span class="empty-msg">No cameras configured.</span>';
+    } else {
+      let html = '<div class="cam-row header"><span>Name</span><span>Status</span><span>Frames</span><span>Persons</span><span>Vehicles</span></div>';
+      for (const c of cams) {
+        const dotClass = c.disabled ? 'disabled' : (c.connected ? 'on' : 'off');
+        const label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
+        html += '<div class="cam-row">' +
+          '<span><span class="dot ' + dotClass + '"></span>' + esc(c.name) + '</span>' +
+          '<span>' + label + '</span>' +
+          '<span>' + (c.frames_captured || 0).toLocaleString() + ' / ' + (c.frames_analysed || 0).toLocaleString() + '</span>' +
+          '<span>' + (c.detections_person || 0).toLocaleString() + '</span>' +
+          '<span>' + (c.detections_vehicle || 0).toLocaleString() + '</span>' +
+          '</div>';
+      }
+      camDiv.innerHTML = html;
+    }
+  } catch (e) {
+    console.error('Status fetch failed', e);
+  }
+}
+
+// Auto-refresh status every 3 seconds when tab is active
+(function initStatusPoll() {
+  statusTimer = setInterval(() => {
+    if (document.querySelector('[data-pane="status"].active')) refreshStatus();
+  }, 3000);
+})();
+
+// Initial load
+refreshStatus();
 
 /* ── Setup tab ─────────────────────────────────────────────────────────── */
 const camerasDiv = document.getElementById('cameras');
@@ -562,6 +699,7 @@ class LineTool:
         self.registry = registry
         self.config = config
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
+        self._start_time = time.monotonic()
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/cameras", self._list_cameras)
@@ -572,6 +710,7 @@ class LineTool:
         self.app.router.add_post("/api/lines/{name}", self._save_line)
         self.app.router.add_delete("/api/lines/{name}/{idx}", self._delete_line)
         self.app.router.add_post("/api/test-rtsp", self._test_rtsp)
+        self.app.router.add_get("/api/status", self._get_status)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -772,6 +911,109 @@ class LineTool:
         self._write_config()
         logger.info("Deleted line %d from camera '%s'", idx, name)
         return web.json_response({"ok": True})
+
+    async def _get_status(self, request: web.Request) -> web.Response:
+        """Return live system status for the Status dashboard tab."""
+        self._reload_config()
+        unifi_cfg = self.config.get("unifi", {}) or {}
+
+        # ── Uptime ────────────────────────────────────────────────────────
+        uptime_secs = int(time.monotonic() - self._start_time)
+
+        # ── CPU load (1-min average) ──────────────────────────────────────
+        try:
+            cpu_load = os.getloadavg()[0]
+        except (OSError, AttributeError):
+            cpu_load = None
+
+        # ── Inference device (from first live camera's AIEngine) ──────────
+        inference_device = "N/A"
+        for cam in self.registry.values():
+            if hasattr(cam, "ai_engine"):
+                inference_device = getattr(cam.ai_engine, "device", "N/A")
+                break
+
+        # If no cameras are running yet, try the global AI config hint
+        if inference_device == "N/A":
+            for cam_cfg in self.config.get("cameras", []):
+                ai_cfg = cam_cfg.get("ai", {}) or {}
+                requested = ai_cfg.get("device", "auto")
+                inference_device = f"{requested} (not started)"
+                break
+
+        # ── GPU utilisation (best-effort) ─────────────────────────────────
+        gpu_info = self._probe_gpu()
+
+        # ── Per-camera status ─────────────────────────────────────────────
+        cam_statuses = []
+        for cam_cfg in self.config.get("cameras", []):
+            name = cam_cfg.get("name", "<unnamed>")
+            entry: dict = {
+                "name": name,
+                "disabled": bool(cam_cfg.get("disabled")),
+                "connected": False,
+                "frames_captured": 0,
+                "frames_analysed": 0,
+                "detections_person": 0,
+                "detections_vehicle": 0,
+            }
+            live = self.registry.get(name)
+            if live and hasattr(live, "ai_engine"):
+                eng = live.ai_engine
+                entry["connected"] = getattr(eng, "_stream_connected", False)
+                entry["frames_captured"] = getattr(eng, "_frames_captured", 0)
+                entry["frames_analysed"] = getattr(eng, "_frames_analysed", 0)
+                entry["detections_person"] = getattr(eng, "_detections_person", 0)
+                entry["detections_vehicle"] = getattr(eng, "_detections_vehicle", 0)
+            cam_statuses.append(entry)
+
+        payload = {
+            "unifi_host": unifi_cfg.get("host", ""),
+            "unifi_username": unifi_cfg.get("username", ""),
+            "cameras_configured": len(self.config.get("cameras", [])),
+            "cameras_running": len(self.registry),
+            "inference_device": inference_device,
+            "cpu_load": round(cpu_load, 2) if cpu_load is not None else None,
+            "gpu": gpu_info,
+            "uptime_seconds": uptime_secs,
+            "python_version": platform.python_version(),
+            "cameras": cam_statuses,
+        }
+        return web.json_response(payload)
+
+    @staticmethod
+    def _probe_gpu() -> dict:
+        """Best-effort GPU info. Returns empty dict if nothing detected."""
+        # Try NVIDIA first (nvidia-smi)
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                text=True, timeout=5,
+            ).strip()
+            if out:
+                parts = [p.strip() for p in out.split(",")]
+                return {
+                    "type": "nvidia",
+                    "name": parts[0] if len(parts) > 0 else "",
+                    "utilization_pct": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
+                    "memory_used_mb": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None,
+                    "memory_total_mb": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None,
+                }
+        except Exception:
+            pass
+
+        # Try Intel OpenVINO
+        try:
+            import openvino as ov
+            devices = ov.Core().available_devices
+            if devices:
+                return {"type": "intel_openvino", "devices": sorted(devices)}
+        except Exception:
+            pass
+
+        return {}
 
     async def _test_rtsp(self, request: web.Request) -> web.Response:
         """Try to open an RTSP stream and read one frame; return ok/message."""
