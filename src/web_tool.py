@@ -28,6 +28,7 @@ import copy
 import logging
 import os
 import platform
+import subprocess
 import time
 import tempfile
 from pathlib import Path
@@ -986,20 +987,26 @@ class LineTool:
         """Best-effort GPU info. Returns empty dict if nothing detected."""
         # Try NVIDIA first (nvidia-smi)
         try:
-            import subprocess
             out = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
                  "--format=csv,noheader,nounits"],
-                text=True, timeout=5,
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
             ).strip()
             if out:
                 parts = [p.strip() for p in out.split(",")]
+
+                def _safe_int(s: str):
+                    try:
+                        return int(float(s))
+                    except (ValueError, TypeError):
+                        return None
+
                 return {
                     "type": "nvidia",
                     "name": parts[0] if len(parts) > 0 else "",
-                    "utilization_pct": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
-                    "memory_used_mb": int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None,
-                    "memory_total_mb": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None,
+                    "utilization_pct": _safe_int(parts[1]) if len(parts) > 1 else None,
+                    "memory_used_mb": _safe_int(parts[2]) if len(parts) > 2 else None,
+                    "memory_total_mb": _safe_int(parts[3]) if len(parts) > 3 else None,
                 }
         except Exception:
             pass

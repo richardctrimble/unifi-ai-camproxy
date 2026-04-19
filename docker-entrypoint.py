@@ -49,9 +49,9 @@ def apply_env_overrides():
     try:
         with open(CONFIG_PATH) as f:
             cfg = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, OSError) as e:
         print(
-            f"WARNING: {CONFIG_PATH} contains invalid YAML ({e}). "
+            f"WARNING: Could not read {CONFIG_PATH} ({e}). "
             "Skipping env var overrides — fix the file or delete it to regenerate.",
             file=sys.stderr,
         )
