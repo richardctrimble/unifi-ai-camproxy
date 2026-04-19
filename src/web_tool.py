@@ -924,7 +924,7 @@ class LineTool:
             eng = cam.ai_engine
             entry["stream_connected"] = eng._stream_connected
             entry["device"] = eng.device
-            entry["model"] = cam_cfg.get("ai", {}).get("model", "yolov8n.pt")
+            entry["model"] = eng.config.get("model", "yolov8n.pt")
             entry["frames_captured"] = eng._frames_captured
             entry["frames_analysed"] = eng._frames_analysed
             entry["detections_person"] = eng._detections_person
