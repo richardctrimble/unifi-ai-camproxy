@@ -817,7 +817,7 @@ class LineTool:
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-        logger.info("Web UI: http://<host>:%d/", port)
+        logger.info("Web UI: http://0.0.0.0:%d/", port)
         try:
             await asyncio.Event().wait()  # block forever
         finally:
