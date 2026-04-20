@@ -29,6 +29,7 @@ import logging
 import os
 import platform
 import subprocess
+import threading
 import time
 import tempfile
 from pathlib import Path
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from unifi_client import AIPortCamera
 
 logger = logging.getLogger("web_tool")
+_RTSP_CAPTURE_OPTIONS_LOCK = threading.Lock()
 
 _VALID_DIRECTIONS = frozenset(
     {"both", "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"}
@@ -1238,22 +1240,23 @@ class LineTool:
             # Hint OpenCV at the desired transport via FFmpeg env var —
             # the OpenCV Python bindings don't take per-capture options,
             # so this is the only portable knob we have.
-            prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
-            cap = cv2.VideoCapture(url)
-            try:
-                if not cap.isOpened():
-                    return False, "Could not open stream"
-                ok, _frame = cap.read()
-                if ok:
-                    return True, f"Stream reachable via {transport}"
-                return False, "Stream opened but could not read a frame"
-            finally:
-                cap.release()
-                if prev is None:
-                    os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
-                else:
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev
+            with _RTSP_CAPTURE_OPTIONS_LOCK:
+                prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
+                cap = cv2.VideoCapture(url)
+                try:
+                    if not cap.isOpened():
+                        return False, "Could not open stream"
+                    ok, _frame = cap.read()
+                    if ok:
+                        return True, f"Stream reachable via {transport}"
+                    return False, "Stream opened but could not read a frame"
+                finally:
+                    cap.release()
+                    if prev is None:
+                        os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+                    else:
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev
 
         try:
             ok, message = await asyncio.wait_for(
