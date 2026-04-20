@@ -482,6 +482,13 @@ class AIEngine:
     def _emit(self, event_type: str, obj_type: str, bbox: list,
               confidence: float, snapshot_path: Optional[Path] = None,
               line_crossing: Optional[str] = None):
+        if event_type == "start":
+            if obj_type == "person":
+                self._detections_person += 1
+            elif obj_type == "vehicle":
+                self._detections_vehicle += 1
+            self._last_detection_ts = time.time()
+
         event = {
             "type": event_type,
             "object": obj_type,
