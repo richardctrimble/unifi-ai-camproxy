@@ -2,9 +2,9 @@
 web_tool.py — embedded web UI for camera configuration and virtual line drawing.
 
 Tabs:
+    Status — live dashboard: connection info, inference device, CPU/GPU load, per-camera stats
     Setup  — add/edit/remove cameras + per-camera AI settings, save to config.yml
     Lines  — draw virtual crossing lines on live frames, save directly to config.yml
-    Status — live per-camera runtime stats (stream state, frame counts, detections)
 
 Endpoints:
     GET  /                       single-page HTML (tabbed UI)
@@ -16,7 +16,7 @@ Endpoints:
     POST /api/lines/<name>       save a new line to a camera's config
     DELETE /api/lines/<name>/<idx>  remove a line by index
     POST /api/test-rtsp          test an RTSP URL (returns {"ok": bool, "message": str})
-    GET  /api/status             per-camera runtime status (stream, frames, detections)
+    GET  /api/status             live system status JSON (polled by the Status tab)
 
 After saving, the UI shows "Restart the container to apply changes."
 """
@@ -27,6 +27,9 @@ import asyncio
 import copy
 import logging
 import os
+import platform
+import subprocess
+import time
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
@@ -143,32 +146,66 @@ INDEX_HTML = r"""<!doctype html>
     .handle    { fill: #4af; stroke: #fff; stroke-width: 1; }
     .empty-msg { color: #666; font-style: italic; padding: 20px; }
 
-    /* Status table */
-    .status-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    .status-table th, .status-table td {
-      padding: 8px 12px; text-align: left; border-bottom: 1px solid #333;
+    /* Status tab */
+    .status-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px;
     }
-    .status-table th { color: #aaa; font-weight: 500; font-size: 13px; }
-    .badge {
-      display: inline-block; padding: 2px 8px; border-radius: 10px;
-      font-size: 12px; font-weight: 600;
+    .status-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #2a2a2a; }
+    .status-label { color: #888; font-size: 13px; }
+    .status-value { font-size: 14px; font-weight: 500; text-align: right; }
+    .cam-row {
+      display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 8px;
+      padding: 8px 0; border-bottom: 1px solid #2a2a2a; font-size: 13px; align-items: center;
     }
-    .badge-ok { background: #166534; color: #4ade80; }
-    .badge-err { background: #7f1d1d; color: #fca5a5; }
-    .badge-wait { background: #78350f; color: #fcd34d; }
+    .cam-row.header { color: #888; font-weight: 600; border-bottom: 1px solid #444; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot.on  { background: #4c4; }
+    .dot.off { background: #f44; }
+    .dot.disabled { background: #666; }
+    @media (max-width: 600px) {
+      .status-grid { grid-template-columns: 1fr; }
+      .cam-row { grid-template-columns: 1fr 1fr; }
+    }
   </style>
 </head>
 <body>
   <h1>unifi-ai-camproxy</h1>
 
   <div class="tabs">
-    <button class="tab active" data-pane="setup">Setup</button>
+    <button class="tab active" data-pane="status">Status</button>
+    <button class="tab" data-pane="setup">Setup</button>
     <button class="tab" data-pane="lines">Lines</button>
-    <button class="tab" data-pane="status">Status</button>
+  </div>
+
+  <!-- ═══ STATUS TAB ═══ -->
+  <div id="status" class="pane active">
+    <div class="card">
+      <div class="card-header"><h3>System</h3></div>
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">UniFi Host</span><span id="s-host" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Python</span><span id="s-python" class="status-value">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Inference</h3></div>
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">Device</span><span id="s-device" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">CPU Load (1m)</span><span id="s-cpu" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU</span><span id="s-gpu" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU Utilization</span><span id="s-gpu-util" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">GPU Memory</span><span id="s-gpu-mem" class="status-value">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Cameras</h3></div>
+      <div id="s-cameras"><span class="empty-msg">Loading…</span></div>
+    </div>
   </div>
 
   <!-- ═══ SETUP TAB ═══ -->
-  <div id="setup" class="pane active">
+  <div id="setup" class="pane">
     <div id="save-banner" class="banner">
       Configuration saved. <strong>Restart the container</strong> to apply changes.
     </div>
@@ -227,16 +264,6 @@ INDEX_HTML = r"""<!doctype html>
     <div id="line-list"></div>
   </div>
 
-  <!-- ═══ STATUS TAB ═══ -->
-  <div id="status" class="pane">
-    <div class="hint">
-      Live camera status — auto-refreshes every 3 seconds while this tab is active.
-    </div>
-    <div id="status-content">
-      <div class="empty-msg">Loading status…</div>
-    </div>
-  </div>
-
 <script>
 /* ── Tab switching ─────────────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(t => {
@@ -246,10 +273,92 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     document.getElementById(t.dataset.pane).classList.add('active');
     if (t.dataset.pane === 'lines') loadLineCameras();
-    if (t.dataset.pane === 'status') startStatusPolling();
-    if (t.dataset.pane !== 'status') stopStatusPolling();
+    if (t.dataset.pane === 'status') refreshStatus();
   });
 });
+
+/* ── Status tab ────────────────────────────────────────────────────────── */
+let statusTimer = null;
+
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+
+async function refreshStatus() {
+  try {
+    const data = await (await fetch('/api/status')).json();
+
+    document.getElementById('s-host').textContent = data.unifi_host || '—';
+    document.getElementById('s-user').textContent = data.unifi_username || '—';
+    document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
+    document.getElementById('s-python').textContent = data.python_version || '—';
+
+    // Inference
+    const dev = data.inference_device || 'N/A';
+    const devEl = document.getElementById('s-device');
+    devEl.textContent = dev;
+    if (dev.startsWith('cuda')) devEl.style.color = '#4c4';
+    else if (dev.startsWith('intel:gpu')) devEl.style.color = '#4af';
+    else if (dev === 'cpu') devEl.style.color = '#fa4';
+    else devEl.style.color = '';
+
+    document.getElementById('s-cpu').textContent = data.cpu_load != null ? data.cpu_load.toFixed(2) : '—';
+
+    // GPU
+    const gpu = data.gpu || {};
+    if (gpu.name) {
+      document.getElementById('s-gpu').textContent = gpu.name;
+      document.getElementById('s-gpu-util').textContent = gpu.utilization_pct != null ? gpu.utilization_pct + '%' : '—';
+      document.getElementById('s-gpu-mem').textContent = (gpu.memory_used_mb != null && gpu.memory_total_mb != null)
+        ? gpu.memory_used_mb + ' / ' + gpu.memory_total_mb + ' MB' : '—';
+    } else if (gpu.devices) {
+      document.getElementById('s-gpu').textContent = 'OpenVINO: ' + gpu.devices.join(', ');
+      document.getElementById('s-gpu-util').textContent = '—';
+      document.getElementById('s-gpu-mem').textContent = '—';
+    } else {
+      document.getElementById('s-gpu').textContent = 'None detected';
+      document.getElementById('s-gpu-util').textContent = '—';
+      document.getElementById('s-gpu-mem').textContent = '—';
+    }
+
+    // Cameras
+    const camDiv = document.getElementById('s-cameras');
+    const cams = data.cameras || [];
+    if (!cams.length) {
+      camDiv.innerHTML = '<span class="empty-msg">No cameras configured.</span>';
+    } else {
+      let html = '<div class="cam-row header"><span>Name</span><span>Status</span><span>Frames</span><span>Persons</span><span>Vehicles</span></div>';
+      for (const c of cams) {
+        const dotClass = c.disabled ? 'disabled' : (c.connected ? 'on' : 'off');
+        const label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
+        html += '<div class="cam-row">' +
+          '<span><span class="dot ' + dotClass + '"></span>' + esc(c.name) + '</span>' +
+          '<span>' + label + '</span>' +
+          '<span>' + (c.frames_captured || 0).toLocaleString() + ' / ' + (c.frames_analysed || 0).toLocaleString() + '</span>' +
+          '<span>' + (c.detections_person || 0).toLocaleString() + '</span>' +
+          '<span>' + (c.detections_vehicle || 0).toLocaleString() + '</span>' +
+          '</div>';
+      }
+      camDiv.innerHTML = html;
+    }
+  } catch (e) {
+    console.error('Status fetch failed', e);
+  }
+}
+
+// Auto-refresh status every 3 seconds when tab is active
+(function initStatusPoll() {
+  statusTimer = setInterval(() => {
+    if (document.querySelector('[data-pane="status"].active')) refreshStatus();
+  }, 3000);
+})();
+
+// Initial load
+refreshStatus();
 
 /* ── Setup tab ─────────────────────────────────────────────────────────── */
 const camerasDiv = document.getElementById('cameras');
@@ -559,68 +668,6 @@ window.deleteLine = async function(idx) {
   }
 };
 
-/* ── Status tab ────────────────────────────────────────────────────────── */
-const statusDiv = document.getElementById('status-content');
-let statusTimer = null;
-
-function stopStatusPolling() {
-  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-}
-
-function startStatusPolling() {
-  stopStatusPolling();
-  loadStatus();
-  statusTimer = setInterval(loadStatus, 3000);
-}
-
-function fmtAgo(ts) {
-  if (!ts) return '—';
-  const sec = Math.floor(Date.now() / 1000 - ts);
-  if (sec < 60) return sec + 's ago';
-  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
-  return Math.floor(sec / 3600) + 'h ago';
-}
-
-async function loadStatus() {
-  try {
-    const resp = await fetch('/api/status');
-    const data = await resp.json();
-    const cams = data.cameras || [];
-    if (!cams.length) {
-      statusDiv.innerHTML = '<div class="empty-msg">No cameras configured.</div>';
-      return;
-    }
-    let html = `<table class="status-table">
-      <thead><tr>
-        <th>Camera</th><th>Stream</th><th>Device</th><th>Model</th>
-        <th>Frames</th><th>Analysed</th>
-        <th>Persons</th><th>Vehicles</th><th>Last Detection</th>
-      </tr></thead><tbody>`;
-    for (const c of cams) {
-      const badge = c.stream_connected
-        ? '<span class="badge badge-ok">Connected</span>'
-        : (c.disabled
-          ? '<span class="badge badge-wait">Disabled</span>'
-          : '<span class="badge badge-err">Disconnected</span>');
-      html += `<tr>
-        <td><strong>${esc(c.name)}</strong></td>
-        <td>${badge}</td>
-        <td>${esc(c.device || '—')}</td>
-        <td>${esc(c.model || '—')}</td>
-        <td>${c.frames_captured ?? '—'}</td>
-        <td>${c.frames_analysed ?? '—'}</td>
-        <td>${c.detections_person ?? '—'}</td>
-        <td>${c.detections_vehicle ?? '—'}</td>
-        <td>${fmtAgo(c.last_detection_ts)}</td>
-      </tr>`;
-    }
-    html += '</tbody></table>';
-    statusDiv.innerHTML = html;
-  } catch (e) {
-    statusDiv.innerHTML = '<div class="empty-msg">Could not load status.</div>';
-  }
-}
-
 /* ── Init ──────────────────────────────────────────────────────────────── */
 loadConfig();
 </script>
@@ -653,6 +700,7 @@ class LineTool:
         self.registry = registry
         self.config = config
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
+        self._start_time = time.monotonic()
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/cameras", self._list_cameras)
@@ -865,6 +913,115 @@ class LineTool:
         logger.info("Deleted line %d from camera '%s'", idx, name)
         return web.json_response({"ok": True})
 
+    async def _get_status(self, request: web.Request) -> web.Response:
+        """Return live system status for the Status dashboard tab."""
+        self._reload_config()
+        unifi_cfg = self.config.get("unifi", {}) or {}
+
+        # ── Uptime ────────────────────────────────────────────────────────
+        uptime_secs = int(time.monotonic() - self._start_time)
+
+        # ── CPU load (1-min average) ──────────────────────────────────────
+        try:
+            cpu_load = os.getloadavg()[0]
+        except (OSError, AttributeError):
+            cpu_load = None
+
+        # ── Inference device (from first live camera's AIEngine) ──────────
+        inference_device = "N/A"
+        for cam in self.registry.values():
+            if hasattr(cam, "ai_engine"):
+                inference_device = getattr(cam.ai_engine, "device", "N/A")
+                break
+
+        # If no cameras are running yet, try the global AI config hint
+        if inference_device == "N/A":
+            for cam_cfg in self.config.get("cameras", []):
+                ai_cfg = cam_cfg.get("ai", {}) or {}
+                requested = ai_cfg.get("device", "auto")
+                inference_device = f"{requested} (not started)"
+                break
+
+        # ── GPU utilisation (best-effort) ─────────────────────────────────
+        gpu_info = self._probe_gpu()
+
+        # ── Per-camera status ─────────────────────────────────────────────
+        cam_statuses = []
+        for cam_cfg in self.config.get("cameras", []):
+            name = cam_cfg.get("name", "<unnamed>")
+            entry: dict = {
+                "name": name,
+                "disabled": bool(cam_cfg.get("disabled")),
+                "connected": False,
+                "frames_captured": 0,
+                "frames_analysed": 0,
+                "detections_person": 0,
+                "detections_vehicle": 0,
+            }
+            live = self.registry.get(name)
+            if live and hasattr(live, "ai_engine"):
+                eng = live.ai_engine
+                entry["connected"] = getattr(eng, "_stream_connected", False)
+                entry["frames_captured"] = getattr(eng, "_frames_captured", 0)
+                entry["frames_analysed"] = getattr(eng, "_frames_analysed", 0)
+                entry["detections_person"] = getattr(eng, "_detections_person", 0)
+                entry["detections_vehicle"] = getattr(eng, "_detections_vehicle", 0)
+            cam_statuses.append(entry)
+
+        payload = {
+            "unifi_host": unifi_cfg.get("host", ""),
+            "unifi_username": unifi_cfg.get("username", ""),
+            "cameras_configured": len(self.config.get("cameras", [])),
+            "cameras_running": len(self.registry),
+            "inference_device": inference_device,
+            "cpu_load": round(cpu_load, 2) if cpu_load is not None else None,
+            "gpu": gpu_info,
+            "uptime_seconds": uptime_secs,
+            "python_version": platform.python_version(),
+            "cameras": cam_statuses,
+        }
+        return web.json_response(payload)
+
+    @staticmethod
+    def _probe_gpu() -> dict:
+        """Best-effort GPU info. Returns empty dict if nothing detected."""
+        # Try NVIDIA first (nvidia-smi)
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+            if out:
+                parts = [p.strip() for p in out.split(",")]
+
+                def _safe_int(s: str):
+                    try:
+                        return int(float(s))
+                    except (ValueError, TypeError):
+                        return None
+
+                return {
+                    "type": "nvidia",
+                    "name": parts[0] if len(parts) > 0 else "",
+                    "utilization_pct": _safe_int(parts[1]) if len(parts) > 1 else None,
+                    "memory_used_mb": _safe_int(parts[2]) if len(parts) > 2 else None,
+                    "memory_total_mb": _safe_int(parts[3]) if len(parts) > 3 else None,
+                }
+        except Exception:
+            pass
+
+        # Try Intel OpenVINO
+        try:
+            import openvino as ov
+            devices = ov.Core().available_devices
+            if devices:
+                return {"type": "intel_openvino", "devices": sorted(devices)}
+        except Exception:
+            pass
+
+        return {}
+
     async def _test_rtsp(self, request: web.Request) -> web.Response:
         """Try to open an RTSP stream and read one frame; return ok/message."""
         try:
@@ -902,38 +1059,6 @@ class LineTool:
 
         return web.json_response({"ok": ok, "message": message})
 
-    async def _get_status(self, request: web.Request) -> web.Response:
-        """Return per-camera runtime status from each AIEngine."""
-        cameras = []
-        for cam_cfg in self.config.get("cameras", []):
-            name = cam_cfg.get("name", "")
-            entry = {"name": name}
-
-            if cam_cfg.get("disabled"):
-                entry["disabled"] = True
-                entry["stream_connected"] = False
-                cameras.append(entry)
-                continue
-
-            cam = self.registry.get(name)
-            if cam is None:
-                entry["stream_connected"] = False
-                cameras.append(entry)
-                continue
-
-            eng = cam.ai_engine
-            entry["stream_connected"] = eng._stream_connected
-            entry["device"] = eng.device
-            entry["model"] = eng.config.get("model", "yolov8n.pt")
-            entry["frames_captured"] = eng._frames_captured
-            entry["frames_analysed"] = eng._frames_analysed
-            entry["detections_person"] = eng._detections_person
-            entry["detections_vehicle"] = eng._detections_vehicle
-            entry["last_detection_ts"] = eng._last_detection_ts
-            cameras.append(entry)
-
-        return web.json_response({"cameras": cameras})
-
     # ── lifecycle ───────────────────────────────────────────────────────────
 
     async def run(self, port: int = 8091) -> None:
@@ -941,7 +1066,7 @@ class LineTool:
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-        logger.info("Web UI: http://<host>:%d/", port)
+        logger.info("Web UI: http://0.0.0.0:%d/", port)
         try:
             await asyncio.Event().wait()  # block forever
         finally:

@@ -6,16 +6,21 @@ Bridges TrueNAS Scale (or any orchestrator that passes env vars) into
 the config.yml format the app expects.
 
 Logic:
-  1. If /config/config.yml already exists -> use it as-is (user-managed).
-  2. If UNIFI_HOST is set -> generate a minimal config.yml with just the
-     controller connection + web tool enabled. Cameras and AI settings
-     are added later through the web UI.
-  3. Otherwise -> crash with a helpful message.
+  1. If /config/config.yml already exists AND UNIFI_HOST is set ->
+     update the unifi connection settings from env vars (so TrueNAS
+     users can change host/creds without manually editing the file).
+     Cameras and AI settings in the file are preserved.
+  2. If /config/config.yml already exists and no UNIFI_HOST is set ->
+     use it as-is (standalone Docker, user-managed).
+  3. If no config.yml but UNIFI_HOST is set -> generate a minimal
+     config.yml with just the controller connection + web tool enabled.
+  4. Otherwise -> crash with a helpful message.
 
 This means the container works in two modes:
   - Standalone Docker: mount your own config.yml, nothing changes.
   - TrueNAS app: the wizard passes host/creds, this script seeds
     config.yml, then the user adds cameras via the web UI.
+    Changing env vars and restarting updates the config automatically.
 
 Environment variables (all optional if config.yml exists):
   UNIFI_HOST, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_TOKEN
@@ -26,7 +31,78 @@ import os
 import sys
 from pathlib import Path
 
+import yaml
+
 CONFIG_PATH = Path("/config/config.yml")
+
+
+def apply_env_overrides():
+    """Update the unifi section of an existing config.yml from env vars.
+
+    Only touches keys that have a corresponding env var set.
+    Cameras, AI settings, web_tool, and everything else are preserved.
+    """
+    host = os.environ.get("UNIFI_HOST")
+    if not host:
+        return  # no env overrides requested
+
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError) as e:
+        print(
+            f"WARNING: Could not read {CONFIG_PATH} ({e}). "
+            "Skipping env var overrides — fix the file or delete it to regenerate.",
+            file=sys.stderr,
+        )
+        return
+
+    unifi = cfg.setdefault("unifi", {})
+    changed = False
+
+    # Host — always apply when UNIFI_HOST is set
+    if unifi.get("host") != host:
+        unifi["host"] = host
+        changed = True
+
+    # Credentials — only update if the env var is actually set
+    for env_key, cfg_key in [
+        ("UNIFI_USERNAME", "username"),
+        ("UNIFI_PASSWORD", "password"),
+        ("UNIFI_TOKEN", "token"),
+    ]:
+        val = os.environ.get(env_key)
+        if val and unifi.get(cfg_key) != val:
+            unifi[cfg_key] = val
+            changed = True
+
+    # Web tool port
+    web_port = os.environ.get("WEB_TOOL_PORT")
+    if web_port:
+        web_cfg = cfg.setdefault("web_tool", {})
+        try:
+            port_int = int(web_port)
+            if web_cfg.get("port") != port_int:
+                web_cfg["port"] = port_int
+                changed = True
+        except ValueError:
+            print(
+                f"WARNING: WEB_TOOL_PORT={web_port!r} is not a valid integer, ignoring.",
+                file=sys.stderr,
+            )
+
+    if changed:
+        try:
+            CONFIG_PATH.write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+        except OSError as e:
+            print(
+                f"WARNING: Could not write updated config to {CONFIG_PATH}: {e}",
+                file=sys.stderr,
+            )
+            return
+        print(f"Updated {CONFIG_PATH} with environment variable overrides")
+    else:
+        print(f"Using existing {CONFIG_PATH} (env vars match)")
 
 
 def generate_config():
@@ -74,7 +150,7 @@ def _quote(val: str) -> str:
 
 def main():
     if CONFIG_PATH.exists():
-        print(f"Using existing {CONFIG_PATH}")
+        apply_env_overrides()
     elif os.environ.get("UNIFI_HOST"):
         generate_config()
     else:
