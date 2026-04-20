@@ -52,7 +52,7 @@ _VALID_DIRECTIONS = frozenset(
 
 _VALID_DEVICES = frozenset(list_supported_devices())
 
-_VALID_RTSP_TRANSPORTS = frozenset({"tcp", "udp", "auto"})
+_VALID_RTSP_TRANSPORTS = frozenset({"tcp", "udp"})
 
 # ─── HTML (single file, no external resources) ──────────────────────────────
 
