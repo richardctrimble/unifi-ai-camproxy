@@ -141,6 +141,14 @@ async def auto_adopt_pending(cfg: dict, camera_specs: list) -> None:
 # Maximum time between retries for a failing camera (seconds).
 _MAX_CAMERA_RETRY_DELAY = 60
 
+# How long to sleep before exiting after an unhandled exception, to avoid
+# the orchestrator's restart policy creating a rapid crash loop.
+_CRASH_BACKOFF_DELAY = 10
+
+# How long the container idles when there's no web UI and no token — gives
+# the user time to fix config before the orchestrator eventually restarts.
+_IDLE_SLEEP_SECONDS = 3600
+
 
 def _validate_camera_cfg(cam_cfg: dict) -> str | None:
     """Validate a camera config dict. Returns an error message or None if OK."""
@@ -299,7 +307,7 @@ async def main():
             return
         # No web UI and no token — nothing useful to do, but don't crash loop
         logger.error("No web UI and no token — container will idle. Fix config and restart.")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(_IDLE_SLEEP_SECONDS)
         return
 
     # 4. Fill in optional per-camera defaults
@@ -330,5 +338,5 @@ if __name__ == "__main__":
         # Sleep before exiting to avoid rapid crash loops when the
         # orchestrator's restart policy kicks in immediately.
         import time
-        time.sleep(10)
+        time.sleep(_CRASH_BACKOFF_DELAY)
         sys.exit(1)

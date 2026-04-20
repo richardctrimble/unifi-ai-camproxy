@@ -1097,6 +1097,9 @@ class LineTool:
 
         async def _delayed_exit():
             await asyncio.sleep(0.5)  # give the HTTP response time to flush
+            # os._exit is intentional: sys.exit raises SystemExit which asyncio
+            # catches and suppresses inside a running event loop. We need the
+            # process to actually terminate so the orchestrator restarts it.
             os._exit(0)
 
         asyncio.ensure_future(_delayed_exit())
