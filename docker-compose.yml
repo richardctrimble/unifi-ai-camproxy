@@ -2,7 +2,8 @@ version: "3.8"
 
 # Default image: CPU + Intel OpenVINO (~1.5GB). Covers plain CPU hosts
 # and Intel iGPU/dGPU/NPU boxes — AIEngine auto-detects the fastest
-# reachable device on startup.
+# reachable device on startup (and each camera can be pinned to a
+# specific device from the web UI's Setup tab).
 #
 # For NVIDIA CUDA, layer docker-compose.gpu.yml on top (it swaps the
 # build to Dockerfile.cuda):
@@ -11,6 +12,14 @@ version: "3.8"
 # For Intel iGPU/dGPU/NPU, layer docker-compose.intel.yml on top (it
 # keeps this same image and just passes through /dev/dri):
 #   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#
+# To mix both (rare — e.g. host with an iGPU + discrete NVIDIA card):
+#   docker compose -f docker-compose.yml \
+#       -f docker-compose.gpu.yml \
+#       -f docker-compose.intel.yml up -d --build
+# Note that this uses the CUDA image which does NOT ship OpenVINO, so
+# intel:* devices will fall back to CPU. For a combined image build
+# your own variant that layers both stacks.
 
 services:
   unifi-ai-camproxy:
@@ -25,3 +34,6 @@ services:
       - ./config:/config        # mount your config.yml here
     environment:
       - PYTHONUNBUFFERED=1
+      # Set LOG_LEVEL=DEBUG to get verbose logs (device probes, ffmpeg
+      # command lines, RTSP reconnect details).
+      # - LOG_LEVEL=DEBUG

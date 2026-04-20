@@ -106,15 +106,26 @@ docker build -f Dockerfile.cuda -t unifi-ai-camproxy:cuda .
 
 ## Acceleration
 
-On startup AIEngine probes every reachable runtime and picks the fastest
-automatically:
+Inference device is configurable **per-camera** — a host with both an
+Intel iGPU and a discrete NVIDIA card can run one camera on CUDA, one
+on `intel:gpu`, and another on CPU, each independently.
+
+Choose it from the **Setup** tab's "Inference Device" dropdown (the UI
+greys out backends this image can't actually reach), or set `ai.device`
+under each camera in `config.yml`.
+
+When a camera's device is left as `auto`, AIEngine probes every reachable
+runtime at startup and picks the fastest in this order:
 
 ```
 cuda → intel:gpu → intel:npu → mps → cpu
 ```
 
-Check `docker compose logs -f` for `Running inference on: …` to see what
-it picked. Override the probe with `ai.device` in `config.yml`.
+The **Status** tab shows the list of backends available on this host and
+the device each camera is actually running on, so you can tell at a
+glance whether `/dev/dri` or the NVIDIA runtime was passed through
+correctly. Watch `docker compose logs -f` for `Inference device: …` on
+every camera for the same information.
 
 ### Intel iGPU / dGPU / NPU (default image)
 
@@ -184,13 +195,15 @@ for a fully commented template with three example cameras.
 | `snapshot_url` | no | from AI engine | HTTP URL for still snapshots |
 | `mac` | no | auto from name | Fake MAC (deterministic from name) |
 | `ip` | no | auto-detected | IP advertised to Protect |
+| `rtsp_transport` | no | `tcp` | `tcp` (reliable) or `udp` (lower latency, may drop) |
+| `disabled` | no | `false` | Skip this camera at startup (useful for debugging) |
 
 ### `cameras[].ai` — per-camera AI settings
 
 | Key | Default | Description |
 |---|---|---|
 | `model` | `yolov8n.pt` | YOLO model file (`yolov8n`/`yolov8s`/`yolov8m`) |
-| `device` | `auto` | Inference device — see [Acceleration](#acceleration) |
+| `device` | `auto` | Per-camera inference device — see [Acceleration](#acceleration). Values: `auto`, `cpu`, `cuda`, `mps`, `intel:cpu`, `intel:gpu`, `intel:npu` |
 | `confidence` | `0.45` | Fallback confidence threshold (0.0–1.0) |
 | `confidence_person` | `confidence` | Override threshold for persons |
 | `confidence_vehicle` | `confidence` | Override threshold for vehicles |
@@ -257,6 +270,35 @@ thresholds, detection classes, and virtual lines. See
 | yolov8s.pt | Medium | Better   | ~600MB |
 | yolov8m.pt | Slower | Best     | ~1.2GB |
 
+## Status dashboard
+
+Open the web UI (`http://<docker-host>:8091/`) and click the **Status**
+tab to see:
+
+- **System** — UniFi host, uptime, Python version, container restart button
+- **Inference** — per-host device, CPU load, GPU name + utilization + memory
+- **Available backends** — every inference runtime this image can reach
+  (✓ green) or not (✗ grey). Makes it obvious whether `/dev/dri` was
+  passed through or the NVIDIA runtime is wired up
+- **Cameras** — per-camera status: connected/disconnected, active
+  inference device, last inference time (ms), frame counters, person
+  and vehicle detection totals, and the error message (if any)
+
+The dashboard auto-refreshes every 3 seconds.
+
+## Logging
+
+Logs go to stdout by default — view them with `docker compose logs -f`.
+
+Set `LOG_LEVEL=DEBUG` in the compose environment to get verbose output:
+device-probe results, ffmpeg command lines, RTSP reconnect details, and
+OpenVINO export progress.
+
+```yaml
+environment:
+  - LOG_LEVEL=DEBUG
+```
+
 ## Troubleshooting
 
 **Camera stuck on "Adopting" in Protect**
@@ -265,13 +307,16 @@ thresholds, detection classes, and virtual lines. See
   must be on the same subnet as Protect)
 - Try removing the camera from Protect and restarting the container
 
-**"Running inference on: cpu" when you expected GPU**
+**"Inference device: cpu" when you expected GPU**
+- Open the web UI's **Status** tab — the "Available backends" card
+  shows exactly which devices this image can reach. If your expected
+  backend is ✗, the host-side passthrough isn't wired up.
 - NVIDIA: make sure `docker-compose.gpu.yml` is layered on and
   nvidia-container-toolkit is installed on the host
 - Intel: make sure `docker-compose.intel.yml` is layered on and
   `/dev/dri` exists. Check render group: `groups | grep render`
-- Run `docker compose logs | grep "Running inference on"` to see what
-  was auto-detected
+- Run `docker compose logs | grep "Inference device"` to see what each
+  camera is running on
 
 **"Could not fetch an adoption token"**
 - Verify your username/password work in the Protect web UI
@@ -322,8 +367,13 @@ A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
    - **UNIFI_HOST** — IP of your UDM / UDM Pro / UNVR
    - **UNIFI_USERNAME** — local Protect account username
    - **UNIFI_PASSWORD** — local Protect account password
-8. (Optional) To enable Intel iGPU acceleration, uncomment the `devices`
-   and `group_add` sections at the bottom
+8. (Optional) Hardware acceleration — uncomment one of the blocks at
+   the bottom of the YAML:
+   - **Intel iGPU / dGPU / NPU** — uncomment `devices` + `group_add`
+     (works with the default `:latest` image)
+   - **NVIDIA GPU** — switch the image to
+     `ghcr.io/richardctrimble/unifi-ai-camproxy:cuda` and uncomment the
+     `deploy.resources.reservations` block
 9. Click **Save** — TrueNAS pulls the container image and starts it
 
 <details>
@@ -332,6 +382,7 @@ A ready-to-paste compose file is included at `truenas/docker-compose.yaml`.
 ```yaml
 services:
   unifi-ai-camproxy:
+    # For NVIDIA GPU hosts, change this tag to ":cuda"
     image: ghcr.io/richardctrimble/unifi-ai-camproxy:latest
     restart: unless-stopped
     network_mode: host
@@ -347,12 +398,23 @@ services:
       # CHANGE ME: local Protect account password
       - UNIFI_PASSWORD=your-password
       - WEB_TOOL_PORT=8091
-    # Uncomment for Intel iGPU acceleration (OpenVINO):
+      # - LOG_LEVEL=DEBUG
+
+    # ── Option A: Intel iGPU / dGPU / NPU (OpenVINO) ──
     # devices:
     #   - /dev/dri:/dev/dri
     # group_add:
     #   - video
     #   - render
+
+    # ── Option B: NVIDIA GPU (also switch image tag to :cuda above) ──
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 ```
 
 </details>

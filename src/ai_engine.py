@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, List, Optional
 
 import cv2
 import numpy as np
@@ -30,6 +30,96 @@ VEHICLE_CLASSES = {2, 3, 5, 7}  # car, motorcycle, bus, truck
 
 # How many frames without a detection before we call it "gone"
 DEBOUNCE_STOP_FRAMES = 10
+
+
+# ─── Shared device probing (module-level, cached) ───────────────────────────
+#
+# probe_available_devices() is called by AIEngine._resolve_device() and by the
+# web UI's /api/status endpoint so it can surface the full list of reachable
+# backends. The probe itself is cheap but imports torch/openvino, so we
+# memoise the result for the lifetime of the process.
+
+_probe_cache: Optional[dict] = None
+
+
+def probe_available_devices(force: bool = False) -> dict:
+    """
+    Enumerate every inference backend this image can actually reach.
+
+    Returns a dict like::
+
+        {
+          "cuda":      {"available": False, "detail": "torch.cuda.is_available() == False"},
+          "mps":       {"available": False, "detail": "not macOS / not Apple Silicon"},
+          "intel:cpu": {"available": True,  "detail": "OpenVINO CPU"},
+          "intel:gpu": {"available": True,  "detail": "OpenVINO GPU"},
+          "intel:npu": {"available": False, "detail": "not in OpenVINO devices"},
+          "cpu":       {"available": True,  "detail": "always available"},
+        }
+
+    Callers use this for (a) "auto" device selection ordering and
+    (b) surfacing the list to the user in the Status dashboard so they
+    can tell at a glance whether /dev/dri or the NVIDIA runtime was
+    actually passed through correctly.
+    """
+    global _probe_cache
+    if _probe_cache is not None and not force:
+        return _probe_cache
+
+    result: dict[str, dict[str, object]] = {}
+
+    # ── CUDA ──────────────────────────────────────────────────────────────
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0) if torch.cuda.device_count() else "CUDA"
+            result["cuda"] = {"available": True, "detail": name}
+        else:
+            result["cuda"] = {"available": False, "detail": "torch reports no CUDA device"}
+    except Exception as e:
+        result["cuda"] = {"available": False, "detail": f"torch import failed: {e}"}
+
+    # ── MPS (Apple Silicon) ───────────────────────────────────────────────
+    try:
+        import torch
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            result["mps"] = {"available": True, "detail": "Apple Metal Performance Shaders"}
+        else:
+            result["mps"] = {"available": False, "detail": "not macOS / not Apple Silicon"}
+    except Exception:
+        result["mps"] = {"available": False, "detail": "torch import failed"}
+
+    # ── OpenVINO (intel:cpu / intel:gpu / intel:npu) ──────────────────────
+    try:
+        import openvino as ov
+        ov_devices = set(ov.Core().available_devices)
+    except Exception as e:
+        ov_devices = set()
+        ov_error = str(e)
+    else:
+        ov_error = ""
+
+    for plugin, key in (("CPU", "intel:cpu"), ("GPU", "intel:gpu"), ("NPU", "intel:npu")):
+        if plugin in ov_devices:
+            result[key] = {"available": True, "detail": f"OpenVINO {plugin}"}
+        elif ov_devices:
+            result[key] = {"available": False, "detail": f"OpenVINO reachable but no {plugin}"}
+        elif ov_error:
+            result[key] = {"available": False, "detail": f"OpenVINO unavailable: {ov_error}"}
+        else:
+            result[key] = {"available": False, "detail": "OpenVINO not installed in image"}
+
+    # ── CPU (always available as a last resort) ───────────────────────────
+    result["cpu"] = {"available": True, "detail": "native PyTorch CPU"}
+
+    _probe_cache = result
+    return result
+
+
+def list_supported_devices() -> List[str]:
+    """Return the canonical order of device choices the UI should expose."""
+    return ["auto", "cpu", "cuda", "mps", "intel:cpu", "intel:gpu", "intel:npu"]
 
 
 class TrackedObject:
@@ -82,7 +172,14 @@ class AIEngine:
         # without rebuilding, and the engine will re-probe at startup.
         requested_device = config.get("device", "auto")
         self.device = self._resolve_device(requested_device)
-        self.logger.info("Running inference on: %s", self.device)
+        self.requested_device = requested_device
+        if requested_device != self.device:
+            self.logger.info(
+                "Inference device: %s (requested %s — fell back after probe)",
+                self.device, requested_device,
+            )
+        else:
+            self.logger.info("Inference device: %s", self.device)
 
         model_path = config.get("model", "yolov8n.pt")
         self.model = self._load_model(model_path, self.device)
@@ -113,6 +210,7 @@ class AIEngine:
         self._detections_vehicle: int = 0
         self._last_detection_ts: Optional[float] = None
         self._stream_connected: bool = False
+        self._last_inference_ms: float = 0.0
 
         # Virtual line crossing — lives here so we can check per-frame
         # against the freshly-updated centroid pair on each tracked object.
@@ -146,63 +244,40 @@ class AIEngine:
         """
         preference = (preference or "auto").lower()
         logger = logging.getLogger("ai_engine")
-
-        # ── Probe helpers ──────────────────────────────────────────────────
-        def _cuda_ok() -> bool:
-            try:
-                import torch
-                return torch.cuda.is_available()
-            except Exception:
-                return False
-
-        def _mps_ok() -> bool:
-            try:
-                import torch
-                return (
-                    getattr(torch.backends, "mps", None) is not None
-                    and torch.backends.mps.is_available()
-                )
-            except Exception:
-                return False
-
-        def _openvino_devices() -> set[str]:
-            """
-            Return the set of OpenVINO plugin names the runtime can
-            actually reach — 'CPU', 'GPU', 'NPU', etc. Empty set if
-            OpenVINO isn't installed in the image.
-            """
-            try:
-                import openvino as ov
-                return set(ov.Core().available_devices)
-            except Exception:
-                return set()
+        probe = probe_available_devices()
 
         # ── Explicit Intel / OpenVINO preference ───────────────────────────
         if preference.startswith("intel:"):
-            target = preference.split(":", 1)[1].upper()  # gpu → GPU
-            ov_devices = _openvino_devices()
-            if not ov_devices:
-                logger.warning(
-                    "ai.device=%s but OpenVINO isn't available in this "
-                    "image — falling back to cpu.",
-                    preference,
-                )
-                return "cpu"
-            if target not in ov_devices:
-                logger.warning(
-                    "ai.device=%s but OpenVINO can't reach %s (saw %s) — "
-                    "falling back to cpu. Usually a /dev/dri passthrough "
-                    "or render-group permissions issue.",
-                    preference, target, sorted(ov_devices),
-                )
-                return "cpu"
-            return preference
+            entry = probe.get(preference, {"available": False, "detail": "unknown"})
+            if entry["available"]:
+                return preference
+            logger.warning(
+                "ai.device=%s requested but unreachable (%s) — falling "
+                "back to cpu. For intel:gpu/npu, make sure /dev/dri is "
+                "passed into the container and your user is in the render group.",
+                preference, entry["detail"],
+            )
+            return "cpu"
 
         # ── Explicit native torch preferences ──────────────────────────────
         if preference == "cuda":
-            return "cuda" if _cuda_ok() else "cpu"
+            if probe["cuda"]["available"]:
+                return "cuda"
+            logger.warning(
+                "ai.device=cuda but CUDA unreachable (%s) — falling back to cpu. "
+                "Did you build the CUDA image (Dockerfile.cuda) and install "
+                "nvidia-container-toolkit on the host?",
+                probe["cuda"]["detail"],
+            )
+            return "cpu"
         if preference == "mps":
-            return "mps" if _mps_ok() else "cpu"
+            if probe["mps"]["available"]:
+                return "mps"
+            logger.warning(
+                "ai.device=mps but MPS unreachable (%s) — falling back to cpu.",
+                probe["mps"]["detail"],
+            )
+            return "cpu"
         if preference == "cpu":
             return "cpu"
 
@@ -210,18 +285,13 @@ class AIEngine:
         if preference != "auto":
             logger.warning("Unknown ai.device=%r, using auto", preference)
 
-        if _cuda_ok():
-            return "cuda"
-
-        ov_devices = _openvino_devices()
-        if "GPU" in ov_devices:
-            return "intel:gpu"
-        if "NPU" in ov_devices:
-            return "intel:npu"
-
-        if _mps_ok():
-            return "mps"
-
+        # Note: we deliberately do NOT pick intel:cpu automatically — the
+        # OpenVINO CPU path is often marginally faster but requires the
+        # ~30s IR export on first start, which is surprising for users
+        # who didn't explicitly ask for it. Native CPU is the safe default.
+        for choice in ("cuda", "intel:gpu", "intel:npu", "mps", "cpu"):
+            if probe.get(choice, {}).get("available"):
+                return choice
         return "cpu"
 
     def _load_model(self, model_path: str, device: str):
@@ -312,24 +382,43 @@ class AIEngine:
     # ─── Internal capture + inference ───────────────────────────────────────
 
     def _capture_loop(self):
-        self.logger.info(f"Opening RTSP stream: {self.rtsp_url}")
+        self.logger.info("Opening capture stream: %s", self.rtsp_url)
         cap = cv2.VideoCapture(self.rtsp_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         frame_count = 0
         reconnect_delay = 2
+        consecutive_inference_errors = 0
 
         while not self._stopped:
             ret, frame = cap.read()
             if not ret:
+                if self._stream_connected:
+                    self.logger.warning(
+                        "Lost capture stream (%s) — retrying in %ds",
+                        self.rtsp_url, reconnect_delay,
+                    )
+                else:
+                    self.logger.debug(
+                        "Capture stream not yet ready (%s) — retrying in %ds",
+                        self.rtsp_url, reconnect_delay,
+                    )
                 self._stream_connected = False
-                self.logger.warning(f"Lost stream, retrying in {reconnect_delay}s...")
                 cap.release()
-                time.sleep(reconnect_delay)
+                # Interruptible wait so .stop() is snappy.
+                slept = 0.0
+                while slept < reconnect_delay and not self._stopped:
+                    time.sleep(0.5)
+                    slept += 0.5
+                if self._stopped:
+                    break
                 cap = cv2.VideoCapture(self.rtsp_url)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 reconnect_delay = min(reconnect_delay * 2, 30)
                 continue
 
+            if not self._stream_connected:
+                self.logger.info("Capture stream connected: %s", self.rtsp_url)
             self._stream_connected = True
             reconnect_delay = 2
             frame_count += 1
@@ -343,8 +432,28 @@ class AIEngine:
             if frame_count % (self.frame_skip * 30) == 0:
                 self._save_snapshot(frame)
 
+            now = time.monotonic()
+            try:
+                self._run_inference(frame)
+                consecutive_inference_errors = 0
+            except Exception as exc:
+                consecutive_inference_errors += 1
+                # Log with a stack trace on the first failure of a burst,
+                # then just a terse counter to avoid spamming the logs
+                # if every frame is failing (e.g. a broken model file).
+                if consecutive_inference_errors == 1:
+                    self.logger.exception(
+                        "Inference error on frame %d: %s", frame_count, exc
+                    )
+                elif consecutive_inference_errors % 50 == 0:
+                    self.logger.error(
+                        "Inference still failing (%d consecutive errors): %s",
+                        consecutive_inference_errors, exc,
+                    )
+                continue
+
             self._frames_analysed += 1
-            self._run_inference(frame)
+            self._last_inference_ms = (time.monotonic() - now) * 1000.0
 
         cap.release()
 

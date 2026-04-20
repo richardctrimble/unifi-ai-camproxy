@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import platform
 import sys
+from pathlib import Path
 from typing import Dict
 
 import yaml
 
+from ai_engine import probe_available_devices
 from auto_config import detect_local_ip, generate_mac
 from cert_gen import ensure_cert
 from unifi_auth import UniFiAuthError, UniFiProtectClient
@@ -23,11 +27,76 @@ camera_registry: Dict[str, AIPortCamera] = {}
 # name. The web tool reads this to display errors on the status page.
 camera_errors: Dict[str, str] = {}
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
+def _configure_logging() -> None:
+    """Configure root logging.
+
+    Environment variables:
+      LOG_LEVEL  — INFO (default), DEBUG, WARNING, ERROR
+      LOG_FILE   — optional path to a rotating log file (e.g.
+                   /config/camproxy.log). When set, logs are written
+                   there in addition to stdout so the web UI's
+                   "View Logs" API can surface them. 5 MB rotation, 3
+                   backups — never more than ~20 MB on disk.
+    """
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    log_file = os.environ.get("LOG_FILE")
+    if log_file:
+        try:
+            from logging.handlers import RotatingFileHandler
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                RotatingFileHandler(
+                    log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8",
+                )
+            )
+        except OSError as exc:
+            # Fall back to stdout-only — don't let logging bring the app down.
+            print(f"WARNING: Could not open LOG_FILE={log_file}: {exc}", file=sys.stderr)
+
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
+
+    # ultralytics is chatty at INFO — tone it down a notch so our own
+    # log lines stay readable. DEBUG still shows everything.
+    if level > logging.DEBUG:
+        logging.getLogger("ultralytics").setLevel(logging.WARNING)
+
+
+_configure_logging()
 logger = logging.getLogger("camproxy")
+
+
+def log_startup_banner() -> None:
+    """Emit a banner describing the runtime environment.
+
+    Makes troubleshooting user reports a lot easier — a single line in
+    the log tells us the platform, Python version, and which inference
+    backends the image can actually reach on this host.
+    """
+    from importlib import metadata
+
+    try:
+        version = metadata.version("ultralytics")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+
+    logger.info("─── unifi-ai-camproxy starting ──────────────────────────────")
+    logger.info("Platform: %s %s / Python %s",
+                platform.system(), platform.machine(), platform.python_version())
+    logger.info("Ultralytics: %s", version)
+
+    probe = probe_available_devices()
+    available = [name for name, info in probe.items() if info["available"]]
+    unavailable = [name for name, info in probe.items() if not info["available"]]
+    logger.info("Available inference devices: %s",
+                ", ".join(available) if available else "none")
+    if unavailable:
+        logger.debug("Unreachable devices: %s", ", ".join(unavailable))
+    logger.info("─────────────────────────────────────────────────────────────")
 
 
 def load_config(path: str = "/config/config.yml") -> dict:
@@ -102,6 +171,38 @@ def fill_camera_defaults(cam_cfg: dict, local_ip: str) -> dict:
     return cam_cfg
 
 
+async def heartbeat_logger() -> None:
+    """Log a compact summary of every running camera on a fixed cadence.
+
+    Easy to grep out of `docker logs` for ops purposes and makes silent
+    failures obvious — if the heartbeat keeps reporting 0 new frames
+    for a camera, something is wrong even if no exception has been raised.
+    """
+    last_counts: dict[str, tuple[int, int]] = {}
+    while True:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+        if not camera_registry:
+            continue
+        parts = []
+        for name, camera in camera_registry.items():
+            eng = getattr(camera, "ai_engine", None)
+            if eng is None:
+                continue
+            cap = getattr(eng, "_frames_captured", 0)
+            ana = getattr(eng, "_frames_analysed", 0)
+            prev_cap, prev_ana = last_counts.get(name, (0, 0))
+            delta_cap = cap - prev_cap
+            delta_ana = ana - prev_ana
+            last_counts[name] = (cap, ana)
+            conn = "up" if getattr(eng, "_stream_connected", False) else "DOWN"
+            parts.append(
+                f"{name}[{conn}] +{delta_cap}f/+{delta_ana}a "
+                f"({getattr(eng, 'device', '?')})"
+            )
+        if parts:
+            logger.info("Heartbeat — %s", " | ".join(parts))
+
+
 async def auto_adopt_pending(cfg: dict, camera_specs: list) -> None:
     """
     After cameras have started connecting, walk the Protect API
@@ -148,6 +249,11 @@ _CRASH_BACKOFF_DELAY = 10
 # How long the container idles when there's no web UI and no token — gives
 # the user time to fix config before the orchestrator eventually restarts.
 _IDLE_SLEEP_SECONDS = 3600
+
+# Cadence of the heartbeat log. Purely informational — lets long-running
+# containers show up in monitoring dashboards and makes "is anything
+# happening?" trivially answerable from `docker logs`.
+_HEARTBEAT_INTERVAL_SECONDS = 300
 
 
 def _validate_camera_cfg(cam_cfg: dict) -> str | None:
@@ -196,6 +302,14 @@ async def _run_camera_once(cam_cfg: dict, global_cfg: dict, token: str):
     cert_path = ensure_cert("/config/client.pem")
     _token = token  # bind into the Args class body below
 
+    _rtsp_transport = (cam_cfg.get("rtsp_transport") or "tcp").lower()
+    if _rtsp_transport not in ("tcp", "udp"):
+        logger.warning(
+            "Unknown rtsp_transport '%s' for camera %s — defaulting to tcp",
+            _rtsp_transport, cam_cfg.get("name"),
+        )
+        _rtsp_transport = "tcp"
+
     class Args:
         host = global_cfg["unifi"]["host"]
         token = _token
@@ -206,7 +320,7 @@ async def _run_camera_once(cam_cfg: dict, global_cfg: dict, token: str):
         fw_version = cam_cfg.get("fw_version", "4.69.55")
         cert = cert_path
         ffmpeg_args = "-c:v copy -ar 32000 -ac 1 -codec:a aac -b:a 32k"
-        rtsp_transport = "tcp"
+        rtsp_transport = _rtsp_transport
 
     args = Args()
 
@@ -233,6 +347,8 @@ async def _run_camera_once(cam_cfg: dict, global_cfg: dict, token: str):
 
 
 async def main():
+    log_startup_banner()
+
     config_path = "/config/config.yml"
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
@@ -322,6 +438,7 @@ async def main():
         for cam in valid_cameras
     )
     tasks.append(asyncio.create_task(auto_adopt_pending(cfg, valid_cameras)))
+    tasks.append(asyncio.create_task(heartbeat_logger()))
 
     # Use return_exceptions=True so one task failure doesn't kill the others.
     # Individual camera tasks already have their own retry logic.
