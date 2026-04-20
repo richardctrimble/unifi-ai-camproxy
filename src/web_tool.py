@@ -39,6 +39,8 @@ import numpy as np
 import yaml
 from aiohttp import web
 
+from ai_engine import list_supported_devices, probe_available_devices
+
 if TYPE_CHECKING:
     from unifi_client import AIPortCamera
 
@@ -47,6 +49,10 @@ logger = logging.getLogger("web_tool")
 _VALID_DIRECTIONS = frozenset(
     {"both", "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top"}
 )
+
+_VALID_DEVICES = frozenset(list_supported_devices())
+
+_VALID_RTSP_TRANSPORTS = frozenset({"tcp", "udp", "auto"})
 
 # ─── HTML (single file, no external resources) ──────────────────────────────
 
@@ -154,10 +160,15 @@ INDEX_HTML = r"""<!doctype html>
     .status-label { color: #888; font-size: 13px; }
     .status-value { font-size: 14px; font-weight: 500; text-align: right; }
     .cam-row {
-      display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 8px;
+      display: grid; grid-template-columns: 2fr 1fr 1.4fr 1.4fr 1fr 1fr 1fr; gap: 8px;
       padding: 8px 0; border-bottom: 1px solid #2a2a2a; font-size: 13px; align-items: center;
     }
     .cam-row.header { color: #888; font-weight: 600; border-bottom: 1px solid #444; }
+    .dev-tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 3px;
+      background: #333; color: #bbd; }
+    .dev-tag.cuda { background: #294; color: #fff; }
+    .dev-tag.intel { background: #226; color: #cef; }
+    .dev-tag.cpu { background: #533; color: #fda; }
     .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
     .dot.on  { background: #4c4; }
     .dot.off { background: #f44; }
@@ -194,12 +205,14 @@ INDEX_HTML = r"""<!doctype html>
     <div class="card">
       <div class="card-header"><h3>Inference</h3></div>
       <div class="status-grid">
-        <div class="status-item"><span class="status-label">Device</span><span id="s-device" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Device (first camera)</span><span id="s-device" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">CPU Load (1m)</span><span id="s-cpu" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">GPU</span><span id="s-gpu" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">GPU Utilization</span><span id="s-gpu-util" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">GPU Memory</span><span id="s-gpu-mem" class="status-value">—</span></div>
       </div>
+      <h3 style="margin-top:12px;">Available backends</h3>
+      <div id="s-devices" style="font-size:13px;">Loading…</div>
     </div>
     <div class="card">
       <div class="card-header"><h3>Cameras</h3></div>
@@ -327,6 +340,18 @@ async function refreshStatus() {
 
     document.getElementById('s-cpu').textContent = data.cpu_load != null ? data.cpu_load.toFixed(2) : '—';
 
+    // Available backends
+    const catalog = window._deviceCatalog || [];
+    if (catalog.length) {
+      const rows = catalog.filter(d => d.id !== 'auto').map(d => {
+        const color = d.available ? '#4c4' : '#888';
+        const check = d.available ? '✓' : '✗';
+        return '<div style="padding:3px 0;"><span style="color:' + color + ';display:inline-block;width:16px;">'
+          + check + '</span><strong>' + esc(d.label) + '</strong> <span style="color:#888;">' + esc(d.detail || '') + '</span></div>';
+      }).join('');
+      document.getElementById('s-devices').innerHTML = rows;
+    }
+
     // GPU
     const gpu = data.gpu || {};
     if (gpu.name) {
@@ -350,15 +375,27 @@ async function refreshStatus() {
     if (!cams.length) {
       camDiv.innerHTML = '<span class="empty-msg">No cameras configured.</span>';
     } else {
-      let html = '<div class="cam-row header"><span>Name</span><span>Status</span><span>Frames</span><span>Persons</span><span>Vehicles</span></div>';
+      let html = '<div class="cam-row header"><span>Name</span><span>Status</span><span>Device</span><span>Inference</span><span>Frames</span><span>Persons</span><span>Vehicles</span></div>';
       for (const c of cams) {
         const hasError = !!c.error;
         const dotClass = c.disabled ? 'disabled' : (hasError ? 'off' : (c.connected ? 'on' : 'off'));
         let label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
         if (hasError && !c.disabled) label = 'Error';
+
+        const dev = c.device_active || c.device_requested || '—';
+        let devCls = 'dev-tag';
+        if (dev.startsWith('cuda')) devCls += ' cuda';
+        else if (dev.startsWith('intel')) devCls += ' intel';
+        else if (dev === 'cpu') devCls += ' cpu';
+        const devTag = '<span class="' + devCls + '">' + esc(dev) + '</span>';
+
+        const inferMs = c.last_inference_ms != null ? (c.last_inference_ms + ' ms') : '—';
+
         html += '<div class="cam-row">' +
           '<span><span class="dot ' + dotClass + '"></span>' + esc(c.name) + '</span>' +
           '<span>' + label + '</span>' +
+          '<span>' + devTag + '</span>' +
+          '<span>' + inferMs + '</span>' +
           '<span>' + (c.frames_captured || 0).toLocaleString() + ' / ' + (c.frames_analysed || 0).toLocaleString() + '</span>' +
           '<span>' + (c.detections_person || 0).toLocaleString() + '</span>' +
           '<span>' + (c.detections_vehicle || 0).toLocaleString() + '</span>' +
@@ -388,52 +425,101 @@ refreshStatus();
 const camerasDiv = document.getElementById('cameras');
 let cameraData = [];
 
+function deviceOptions(selected) {
+  // deviceCatalog is populated from /api/devices on first load; fall back
+  // to a fixed list until it arrives so the UI is never blank.
+  const catalog = window._deviceCatalog || [
+    {id: 'auto', label: 'Auto (recommended)', available: true},
+    {id: 'cpu', label: 'CPU', available: true},
+    {id: 'cuda', label: 'NVIDIA GPU (CUDA)', available: false},
+    {id: 'mps', label: 'Apple Silicon (MPS)', available: false},
+    {id: 'intel:gpu', label: 'Intel iGPU/dGPU (OpenVINO)', available: false},
+    {id: 'intel:cpu', label: 'Intel CPU (OpenVINO)', available: false},
+    {id: 'intel:npu', label: 'Intel NPU (OpenVINO)', available: false},
+  ];
+  const chosen = selected || 'auto';
+  return catalog.map(d => {
+    const tag = d.available ? '' : ' — unavailable';
+    const sel = d.id === chosen ? 'selected' : '';
+    return `<option value="${esc(d.id)}" ${sel}>${esc(d.label)}${tag}</option>`;
+  }).join('');
+}
+
 function createCameraCard(cam, idx) {
   const ai = cam.ai || {};
   const card = document.createElement('div');
   card.className = 'card';
+  const device = ai.device || 'auto';
+  const rtspTransport = cam.rtsp_transport || 'tcp';
   card.innerHTML = `
     <div class="card-header">
-      <h3>Camera ${idx + 1}</h3>
+      <h3>${esc(cam.name || 'Camera ' + (idx + 1))}</h3>
       <button class="btn-danger btn-sm remove-cam" data-idx="${idx}">Remove</button>
     </div>
     <div class="grid">
       <div class="field">
         <label>Name</label>
         <input data-key="name" value="${esc(cam.name || '')}" placeholder="e.g. Front Door">
-        <div class="example">e.g. Front Door</div>
+        <div class="example">Display name used in UniFi Protect</div>
       </div>
       <div class="field">
         <label>RTSP URL</label>
         <div class="field-row">
-          <input data-key="rtsp_url" value="${esc(cam.rtsp_url || '')}" placeholder="e.g. rtsp://192.168.1.100:7447/abcdef123456_1" style="flex:1;">
-          <button class="btn-sm test-rtsp-btn" type="button">Test RTSP</button>
+          <input data-key="rtsp_url" value="${esc(cam.rtsp_url || '')}" placeholder="rtsp://user:pass@192.168.1.50:554/stream1" style="flex:1;">
+          <button class="btn-sm test-rtsp-btn" type="button">Test</button>
         </div>
-        <div class="example">e.g. rtsp://192.168.1.100:7447/abcdef123456_1</div>
+        <div class="example">e.g. rtsp://admin:password@192.168.1.50:554/stream1</div>
         <div class="rtsp-status" style="font-size:12px;margin-top:3px;"></div>
       </div>
       <div class="field">
         <label>Snapshot URL (optional)</label>
-        <input data-key="snapshot_url" value="${esc(cam.snapshot_url || '')}" placeholder="e.g. http://192.168.1.100/snap.jpeg">
-        <div class="example">e.g. http://192.168.1.100/snap.jpeg</div>
+        <input data-key="snapshot_url" value="${esc(cam.snapshot_url || '')}" placeholder="http://192.168.1.50/snap.jpeg">
+        <div class="example">HTTP still — fallback when no frame is available</div>
+      </div>
+      <div class="field">
+        <label>RTSP Transport</label>
+        <select data-key="rtsp_transport">
+          <option value="tcp" ${rtspTransport === 'tcp' ? 'selected' : ''}>tcp (reliable, default)</option>
+          <option value="udp" ${rtspTransport === 'udp' ? 'selected' : ''}>udp (lower latency, may drop)</option>
+        </select>
+        <div class="example">Use udp only if your camera/network prefers it</div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:16px;">AI detection</h3>
+    <div class="grid">
+      <div class="field">
+        <label>Inference Device</label>
+        <select data-key="ai.device">${deviceOptions(device)}</select>
+        <div class="example">Per-camera override. "Auto" picks the fastest reachable.</div>
       </div>
       <div class="field">
         <label>Model</label>
         <select data-key="ai.model">
-          <option value="yolov8n.pt" ${ai.model === 'yolov8s.pt' || ai.model === 'yolov8m.pt' ? '' : 'selected'}>yolov8n.pt (fast)</option>
-          <option value="yolov8s.pt" ${ai.model === 'yolov8s.pt' ? 'selected' : ''}>yolov8s.pt (balanced)</option>
-          <option value="yolov8m.pt" ${ai.model === 'yolov8m.pt' ? 'selected' : ''}>yolov8m.pt (accurate)</option>
+          <option value="yolov8n.pt" ${ai.model === 'yolov8s.pt' || ai.model === 'yolov8m.pt' ? '' : 'selected'}>yolov8n.pt — fastest</option>
+          <option value="yolov8s.pt" ${ai.model === 'yolov8s.pt' ? 'selected' : ''}>yolov8s.pt — balanced</option>
+          <option value="yolov8m.pt" ${ai.model === 'yolov8m.pt' ? 'selected' : ''}>yolov8m.pt — most accurate</option>
         </select>
       </div>
       <div class="field">
-        <label>Confidence</label>
-        <input data-key="ai.confidence" type="number" min="0" max="1" step="0.05" value="${ai.confidence ?? 0.45}" placeholder="e.g. 0.45">
-        <div class="example">e.g. 0.45 (range 0–1)</div>
+        <label>Frame Skip</label>
+        <input data-key="ai.frame_skip" type="number" min="1" max="30" value="${ai.frame_skip ?? 3}" placeholder="3">
+        <div class="example">Analyse every Nth frame. Higher = less CPU.</div>
       </div>
       <div class="field">
-        <label>Frame Skip</label>
-        <input data-key="ai.frame_skip" type="number" min="1" max="30" value="${ai.frame_skip ?? 3}" placeholder="e.g. 3">
-        <div class="example">e.g. 3 (process every Nth frame)</div>
+        <label>Confidence (fallback)</label>
+        <input data-key="ai.confidence" type="number" min="0" max="1" step="0.05" value="${ai.confidence ?? 0.45}" placeholder="0.45">
+        <div class="example">0.0–1.0, used when per-class not set</div>
+      </div>
+      <div class="field">
+        <label>Confidence — Persons</label>
+        <input data-key="ai.confidence_person" type="number" min="0" max="1" step="0.05" value="${ai.confidence_person ?? ''}" placeholder="e.g. 0.45">
+        <div class="example">Leave blank to use fallback</div>
+      </div>
+      <div class="field">
+        <label>Confidence — Vehicles</label>
+        <input data-key="ai.confidence_vehicle" type="number" min="0" max="1" step="0.05" value="${ai.confidence_vehicle ?? ''}" placeholder="e.g. 0.60">
+        <div class="example">Vehicles often want stricter threshold</div>
       </div>
       <div class="field">
         <label class="field-row">
@@ -450,16 +536,18 @@ function createCameraCard(cam, idx) {
       <div class="field">
         <label class="field-row">
           <input type="checkbox" data-key="disabled" ${cam.disabled ? 'checked' : ''}>
-          Disabled (skip this camera on startup)
+          Disabled (skip on startup)
         </label>
       </div>
     </div>`;
   card.querySelector('.remove-cam').addEventListener('click', () => {
+    cameraData = readCamerasFromDOM();
     cameraData.splice(idx, 1);
     renderCameras();
   });
   card.querySelector('.test-rtsp-btn').addEventListener('click', async () => {
     const rtspInput = card.querySelector('[data-key="rtsp_url"]');
+    const transportSel = card.querySelector('[data-key="rtsp_transport"]');
     const statusDiv = card.querySelector('.rtsp-status');
     const rtspUrl = rtspInput.value.trim();
     if (!rtspUrl) { statusDiv.textContent = 'Enter an RTSP URL first.'; statusDiv.style.color = '#f87'; return; }
@@ -469,7 +557,7 @@ function createCameraCard(cam, idx) {
       const resp = await fetch('/api/test-rtsp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rtsp_url: rtspUrl }),
+        body: JSON.stringify({ rtsp_url: rtspUrl, rtsp_transport: transportSel ? transportSel.value : 'tcp' }),
       });
       const data = await resp.json();
       if (data.ok) {
@@ -515,10 +603,14 @@ function readCamerasFromDOM() {
       let val;
       if (el.type === 'checkbox') val = el.checked;
       else if (el.type === 'number') {
+        if (el.value === '' || el.value == null) return; // leave empty numbers unset
         val = INTEGER_KEYS.has(key) ? parseInt(el.value, 10) : parseFloat(el.value);
-        if (isNaN(val)) return; // skip empty/invalid number fields
+        if (isNaN(val)) return;
       }
-      else val = el.value.trim();
+      else val = (typeof el.value === 'string') ? el.value.trim() : el.value;
+
+      // Skip empty string values for optional top-level fields like snapshot_url
+      if (val === '' && !key.startsWith('ai.')) return;
 
       if (key.startsWith('ai.')) {
         ai[key.slice(3)] = val;
@@ -558,6 +650,14 @@ document.getElementById('save-all').addEventListener('click', async () => {
     alert('Save failed: ' + await resp.text());
   }
 });
+
+async function loadDeviceCatalog() {
+  try {
+    const resp = await fetch('/api/devices');
+    const data = await resp.json();
+    window._deviceCatalog = data.devices || null;
+  } catch (_) { /* fall back to built-in list */ }
+}
 
 async function loadConfig() {
   try {
@@ -693,7 +793,10 @@ window.deleteLine = async function(idx) {
 };
 
 /* ── Init ──────────────────────────────────────────────────────────────── */
-loadConfig();
+(async () => {
+  await loadDeviceCatalog();
+  await loadConfig();
+})();
 </script>
 </body>
 </html>
@@ -738,6 +841,8 @@ class LineTool:
         self.app.router.add_delete("/api/lines/{name}/{idx}", self._delete_line)
         self.app.router.add_post("/api/test-rtsp", self._test_rtsp)
         self.app.router.add_get("/api/status", self._get_status)
+        self.app.router.add_get("/api/devices", self._get_devices)
+        self.app.router.add_get("/api/logs", self._get_logs)
         self.app.router.add_post("/api/restart", self._restart_container)
 
     # ── helpers ─────────────────────────────────────────────────────────────
@@ -826,18 +931,55 @@ class LineTool:
         if not isinstance(new_cameras, list):
             return web.Response(status=400, text="invalid payload: 'cameras' must be a list")
 
-        # Clean up: remove empty optional fields
+        seen_names: set[str] = set()
+
+        # Clean up + validate per-camera config
         for idx, cam in enumerate(new_cameras):
             if not isinstance(cam, dict):
                 return web.Response(
                     status=400,
                     text=f"invalid payload: cameras[{idx}] must be an object",
                 )
+            name = (cam.get("name") or "").strip()
+            if not name:
+                return web.Response(
+                    status=400,
+                    text=f"camera {idx + 1}: name is required",
+                )
+            if name in seen_names:
+                return web.Response(
+                    status=400,
+                    text=(f"camera {idx + 1}: duplicate name '{name}'. "
+                          "Each camera must have a unique name."),
+                )
+            seen_names.add(name)
+            cam["name"] = name
+
+            rtsp_url = (cam.get("rtsp_url") or "").strip()
+            if not rtsp_url:
+                return web.Response(
+                    status=400,
+                    text=f"camera '{name}': rtsp_url is required",
+                )
+            cam["rtsp_url"] = rtsp_url
+
             if not cam.get("snapshot_url"):
                 cam.pop("snapshot_url", None)
             # Remove disabled: false to keep config clean (only store disabled: true)
             if not cam.get("disabled"):
                 cam.pop("disabled", None)
+
+            transport = cam.get("rtsp_transport")
+            if transport:
+                if transport not in _VALID_RTSP_TRANSPORTS:
+                    return web.Response(
+                        status=400,
+                        text=f"invalid rtsp_transport '{transport}' — must be tcp or udp",
+                    )
+                if transport == "tcp":
+                    # tcp is the default — keep config minimal
+                    cam.pop("rtsp_transport", None)
+
             ai = cam.get("ai", {})
             if ai is not None and not isinstance(ai, dict):
                 return web.Response(
@@ -845,14 +987,23 @@ class LineTool:
                     text=f"invalid payload: cameras[{idx}].ai must be an object",
                 )
             if ai:
-                # Remove defaults so config stays clean
-                for key, default in [
-                    ("model", "yolov8n.pt"),
-                    ("confidence", 0.45),
-                    ("frame_skip", 3),
-                    ("detect_persons", True),
-                    ("detect_vehicles", True),
-                ]:
+                device = ai.get("device")
+                if device and device not in _VALID_DEVICES:
+                    return web.Response(
+                        status=400,
+                        text=(f"invalid ai.device '{device}' — must be one of "
+                              f"{sorted(_VALID_DEVICES)}"),
+                    )
+                # Remove defaults so the stored config stays short and readable.
+                defaults = {
+                    "model": "yolov8n.pt",
+                    "confidence": 0.45,
+                    "frame_skip": 3,
+                    "detect_persons": True,
+                    "detect_vehicles": True,
+                    "device": "auto",
+                }
+                for key, default in defaults.items():
                     if key in ai and ai[key] == default:
                         del ai[key]
                 if not ai or ai == {}:
@@ -974,8 +1125,10 @@ class LineTool:
 
         # ── Per-camera status ─────────────────────────────────────────────
         cam_statuses = []
+        now = time.time()
         for cam_cfg in self.config.get("cameras", []):
             name = cam_cfg.get("name", "<unnamed>")
+            ai_cfg = cam_cfg.get("ai", {}) or {}
             entry: dict = {
                 "name": name,
                 "disabled": bool(cam_cfg.get("disabled")),
@@ -984,6 +1137,10 @@ class LineTool:
                 "frames_analysed": 0,
                 "detections_person": 0,
                 "detections_vehicle": 0,
+                "device_requested": ai_cfg.get("device", "auto"),
+                "device_active": None,
+                "last_inference_ms": None,
+                "last_detection_age_s": None,
                 "error": self._error_registry.get(name),
             }
             live = self.registry.get(name)
@@ -994,6 +1151,13 @@ class LineTool:
                 entry["frames_analysed"] = getattr(eng, "_frames_analysed", 0)
                 entry["detections_person"] = getattr(eng, "_detections_person", 0)
                 entry["detections_vehicle"] = getattr(eng, "_detections_vehicle", 0)
+                entry["device_active"] = getattr(eng, "device", None)
+                last_ms = getattr(eng, "_last_inference_ms", None)
+                if last_ms:
+                    entry["last_inference_ms"] = round(float(last_ms), 1)
+                last_ts = getattr(eng, "_last_detection_ts", None)
+                if last_ts:
+                    entry["last_detection_age_s"] = int(now - last_ts)
             cam_statuses.append(entry)
 
         payload = {
@@ -1058,22 +1222,34 @@ class LineTool:
             return web.Response(status=400, text="invalid JSON")
 
         rtsp_url = body.get("rtsp_url", "")
+        transport = (body.get("rtsp_transport") or "tcp").lower()
+        if transport not in _VALID_RTSP_TRANSPORTS:
+            transport = "tcp"
         if not rtsp_url:
             return web.json_response({"ok": False, "message": "rtsp_url is required"})
 
         loop = asyncio.get_event_loop()
 
         def _check_stream(url: str) -> tuple[bool, str]:
+            # Hint OpenCV at the desired transport via FFmpeg env var —
+            # the OpenCV Python bindings don't take per-capture options,
+            # so this is the only portable knob we have.
+            prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
             cap = cv2.VideoCapture(url)
             try:
                 if not cap.isOpened():
                     return False, "Could not open stream"
                 ok, _frame = cap.read()
                 if ok:
-                    return True, "Stream reachable — frame read successfully"
+                    return True, f"Stream reachable via {transport}"
                 return False, "Stream opened but could not read a frame"
             finally:
                 cap.release()
+                if prev is None:
+                    os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+                else:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev
 
         try:
             ok, message = await asyncio.wait_for(
@@ -1086,6 +1262,69 @@ class LineTool:
             return web.json_response({"ok": False, "message": str(exc)})
 
         return web.json_response({"ok": ok, "message": message})
+
+    async def _get_devices(self, request: web.Request) -> web.Response:
+        """Return the list of inference devices this image can reach.
+
+        The UI uses this to render the per-camera "Inference Device"
+        dropdown and flag unreachable devices so users don't pick
+        something that's only going to fall back to CPU at runtime.
+        """
+        probe = probe_available_devices()
+
+        # Label map — we explicitly pin the order so the dropdown is stable.
+        labels = [
+            ("auto",      "Auto (recommended)"),
+            ("cpu",       "CPU"),
+            ("cuda",      "NVIDIA GPU (CUDA)"),
+            ("intel:gpu", "Intel iGPU/dGPU (OpenVINO)"),
+            ("intel:npu", "Intel NPU (OpenVINO)"),
+            ("intel:cpu", "Intel CPU (OpenVINO)"),
+            ("mps",       "Apple Silicon (MPS)"),
+        ]
+
+        devices = []
+        for key, label in labels:
+            if key == "auto":
+                devices.append({"id": "auto", "label": label, "available": True,
+                                "detail": "probes at startup"})
+                continue
+            info = probe.get(key, {"available": False, "detail": "unknown"})
+            devices.append({
+                "id": key,
+                "label": label,
+                "available": bool(info.get("available")),
+                "detail": info.get("detail", ""),
+            })
+        return web.json_response({"devices": devices})
+
+    async def _get_logs(self, request: web.Request) -> web.Response:
+        """Return the last ~200 lines of logs if a log file is in use.
+
+        This is a best-effort convenience so TrueNAS users without easy
+        SSH access can inspect the tail of the log from the web UI.
+        Falls back to a helpful message when stdout logging is in use
+        (the standard Docker setup) since we can't read our own stdout.
+        """
+        log_path = os.environ.get("LOG_FILE") or "/config/camproxy.log"
+        try:
+            if not Path(log_path).exists():
+                return web.json_response({
+                    "ok": False,
+                    "message": ("No log file on disk. Use 'docker logs' or set "
+                                "LOG_FILE=/config/camproxy.log to persist logs."),
+                    "lines": [],
+                })
+            # Read last 200 lines
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 32_768))
+                tail = f.read().decode("utf-8", errors="replace")
+            lines = tail.splitlines()[-200:]
+            return web.json_response({"ok": True, "lines": lines})
+        except OSError as exc:
+            return web.json_response({"ok": False, "message": str(exc), "lines": []})
 
     async def _restart_container(self, request: web.Request) -> web.Response:
         """Trigger a graceful container restart by exiting the process.

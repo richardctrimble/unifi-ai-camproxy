@@ -4,14 +4,25 @@
 #   1. In TrueNAS web UI: Apps > Discover Apps > Custom App > Install via YAML
 #   2. Paste this file into the editor
 #   3. Edit the four values marked CHANGE ME below
-#   4. Click Save — TrueNAS will pull the image and start the container
-#   5. Open http://<truenas-ip>:8091/ to add cameras via the web UI
+#   4. (Optional) Uncomment the hardware-acceleration block for your
+#      system — Intel iGPU / dGPU / NPU (OpenVINO) or NVIDIA CUDA.
+#   5. Click Save — TrueNAS will pull the image and start the container
+#   6. Open http://<truenas-ip>:8091/ to add cameras via the web UI
 #
-# Camera and AI settings are managed through the web UI, not here.
-# This compose file only needs your Protect credentials and a storage path.
+# Camera + AI settings (including per-camera "Inference Device") are
+# managed through the web UI, not here. This compose file only needs
+# your Protect credentials and a storage path.
+#
+# The :latest image ships CPU PyTorch + Intel OpenVINO and covers
+# most TrueNAS Scale systems (which typically run Intel CPUs with
+# integrated graphics). For NVIDIA GPU acceleration use the :cuda
+# image tag instead and uncomment the NVIDIA block below.
 
 services:
   unifi-ai-camproxy:
+    # Default: CPU + Intel OpenVINO image (~1.5GB).
+    # For NVIDIA GPU hosts, swap to the CUDA variant:
+    #   image: ghcr.io/richardctrimble/unifi-ai-camproxy:cuda
     image: ghcr.io/richardctrimble/unifi-ai-camproxy:latest
     restart: unless-stopped
     network_mode: host
@@ -27,9 +38,33 @@ services:
       # CHANGE ME: local Protect account password
       - UNIFI_PASSWORD=your-password
       - WEB_TOOL_PORT=8091
-    # Uncomment the lines below to enable Intel iGPU acceleration (OpenVINO):
+      # Optional: increase log verbosity for troubleshooting.
+      # - LOG_LEVEL=DEBUG
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Hardware acceleration — uncomment ONE block that matches your host.
+    #
+    # Option A — Intel iGPU / dGPU / NPU (OpenVINO)
+    #   Works with the default :latest image above. Covers Intel N100,
+    #   Iris Xe, Arc, Meteor / Arrow Lake NPUs. Requires /dev/dri to
+    #   exist on the host and your user to be in the "render" group.
+    # ─────────────────────────────────────────────────────────────────────
     # devices:
     #   - /dev/dri:/dev/dri
     # group_add:
     #   - video
     #   - render
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Option B — NVIDIA GPU (CUDA)
+    #   Switch the image tag above to :cuda and uncomment the block below.
+    #   Requires nvidia-container-toolkit installed on the TrueNAS host
+    #   (TrueNAS Scale 24.10+ supports it out of the box on most builds).
+    # ─────────────────────────────────────────────────────────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

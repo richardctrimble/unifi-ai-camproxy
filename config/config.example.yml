@@ -43,13 +43,24 @@ cameras:
     # mac: "AA:BB:CC:11:22:33"
     # ip:  "192.168.1.101"
 
+    # RTSP transport — tcp (default) is reliable; udp lowers latency on
+    # a clean local network at the risk of dropped packets.
+    rtsp_transport: "tcp"
+
     ai:
       model: "yolov8n.pt"      # yolov8n=fast, yolov8s=balanced, yolov8m=accurate
 
-      # Inference device. "auto" probes what's reachable and picks the
-      # fastest: cuda → intel:gpu → intel:npu → mps → cpu.
+      # Per-camera inference device. "auto" probes what's reachable and
+      # picks the fastest: cuda → intel:gpu → intel:npu → mps → cpu.
       #
-      # Force a specific target if you want:
+      # Because this is per-camera, a host with e.g. an Intel iGPU plus
+      # a dedicated NVIDIA card can run one camera on CUDA, one on
+      # intel:gpu, and one on cpu — each independently. The UI "Setup"
+      # tab shows only the backends this image can actually reach so
+      # you can't pick something that would silently fall back to CPU.
+      #
+      # Supported values:
+      #   auto       — probe and pick the fastest reachable (recommended)
       #   cpu        — force CPU (PyTorch native)
       #   cuda       — NVIDIA GPU (needs Dockerfile.cuda via docker-compose.gpu.yml)
       #   mps        — Apple Silicon (bare-metal only, not Docker)
@@ -101,11 +112,12 @@ cameras:
   - name: "Backyard"
     rtsp_url: "rtsp://admin:password@192.168.1.51:554/stream1"
 
-  # ── Camera 3: vehicles only, custom thresholds, two lines ──────────────
+  # ── Camera 3: vehicles only, custom thresholds, pinned to CUDA, two lines
   - name: "Driveway"
     rtsp_url: "rtsp://admin:password@192.168.1.52:554/stream1"
     ai:
       model: "yolov8s.pt"      # slightly better at vehicles than yolov8n
+      device: "cuda"            # pin this camera to the NVIDIA GPU
       confidence_vehicle: 0.55
       detect_persons: false     # ignore people on this camera
       detect_vehicles: true
