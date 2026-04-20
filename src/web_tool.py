@@ -439,9 +439,13 @@ function deviceOptions(selected) {
   ];
   const chosen = selected || 'auto';
   return catalog.map(d => {
+    const isChosen = d.id === chosen;
     const tag = d.available ? '' : ' — unavailable';
-    const sel = d.id === chosen ? 'selected' : '';
-    return `<option value="${esc(d.id)}" ${sel}>${esc(d.label)}${tag}</option>`;
+    const sel = isChosen ? 'selected' : '';
+    // Disable unavailable options unless they are already the saved value,
+    // so users can see what is configured but cannot pick an unreachable backend.
+    const dis = (!d.available && !isChosen) ? 'disabled' : '';
+    return `<option value="${esc(d.id)}" ${sel} ${dis}>${esc(d.label)}${tag}</option>`;
   }).join('');
 }
 
