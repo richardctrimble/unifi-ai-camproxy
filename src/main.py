@@ -94,6 +94,12 @@ def log_startup_banner() -> None:
     unavailable = [name for name, info in probe.items() if not info["available"]]
     logger.info("Available inference devices: %s",
                 ", ".join(available) if available else "none")
+    # Surface why the accelerators a user most likely wants are unreachable —
+    # this turns a silent "fell back to CPU" into an actionable log line.
+    for key in ("cuda", "intel:gpu", "intel:npu"):
+        info = probe.get(key)
+        if info and not info["available"]:
+            logger.info("  %s unavailable: %s", key, info["detail"])
     if unavailable:
         logger.debug("Unreachable devices: %s", ", ".join(unavailable))
     logger.info("─────────────────────────────────────────────────────────────")

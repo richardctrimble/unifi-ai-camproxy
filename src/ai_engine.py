@@ -9,6 +9,7 @@ Detection lifecycle:
 
 import asyncio
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -91,22 +92,57 @@ def probe_available_devices(force: bool = False) -> dict:
         result["mps"] = {"available": False, "detail": "torch import failed"}
 
     # ── OpenVINO (intel:cpu / intel:gpu / intel:npu) ──────────────────────
+    #
+    # We enumerate the devices OpenVINO can actually reach. If GPU/NPU
+    # are NOT in available_devices we probe the plugin explicitly so we
+    # can surface the underlying reason (missing /dev/dri, permission
+    # denied on renderD128, unsupported iGPU, etc.) instead of silently
+    # falling back to CPU.
+    core = None
+    ov_devices: set[str] = set()
+    ov_error = ""
     try:
         import openvino as ov
-        ov_devices = set(ov.Core().available_devices)
+        core = ov.Core()
+        ov_devices = set(core.available_devices)
     except Exception as e:
-        ov_devices = set()
         ov_error = str(e)
-    else:
-        ov_error = ""
+
+    def _gpu_diagnostic() -> str:
+        """Return a human-readable reason the GPU plugin isn't visible."""
+        dri_path = "/dev/dri"
+        if not os.path.isdir(dri_path):
+            return "no /dev/dri inside container (passthrough missing)"
+        render_nodes = [n for n in os.listdir(dri_path) if n.startswith("renderD")]
+        if not render_nodes:
+            return "/dev/dri present but no renderD* node (iGPU driver not loaded on host)"
+        node = f"{dri_path}/{render_nodes[0]}"
+        if not os.access(node, os.R_OK | os.W_OK):
+            return (
+                f"{node} present but not accessible by this process — "
+                f"add the render group GID to group_add in your compose file"
+            )
+        if core is not None:
+            try:
+                core.get_property("GPU", "FULL_DEVICE_NAME")
+                return "GPU plugin reported no device"
+            except Exception as e:
+                return f"OpenVINO GPU plugin error: {e}"
+        return "OpenVINO core not initialised"
 
     for plugin, key in (("CPU", "intel:cpu"), ("GPU", "intel:gpu"), ("NPU", "intel:npu")):
         if plugin in ov_devices:
-            result[key] = {"available": True, "detail": f"OpenVINO {plugin}"}
-        elif ov_devices:
-            result[key] = {"available": False, "detail": f"OpenVINO reachable but no {plugin}"}
+            try:
+                full_name = core.get_property(plugin, "FULL_DEVICE_NAME") if core else plugin
+            except Exception:
+                full_name = plugin
+            result[key] = {"available": True, "detail": f"OpenVINO {plugin} ({full_name})"}
         elif ov_error:
             result[key] = {"available": False, "detail": f"OpenVINO unavailable: {ov_error}"}
+        elif plugin == "GPU":
+            result[key] = {"available": False, "detail": _gpu_diagnostic()}
+        elif ov_devices:
+            result[key] = {"available": False, "detail": f"OpenVINO reachable but no {plugin}"}
         else:
             result[key] = {"available": False, "detail": "OpenVINO not installed in image"}
 
