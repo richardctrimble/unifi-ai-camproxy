@@ -28,6 +28,7 @@ import copy
 import logging
 import os
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -1305,6 +1306,10 @@ class LineTool:
             })
         return web.json_response({"devices": devices})
 
+    def _redact_log_line(self, line: str) -> str:
+        """Redact sensitive values before returning log content to the UI."""
+        return re.sub(r"(?i)(rtsp://)([^/\s:@]+):([^@\s]+)@", r"\1***:***@", line)
+
     async def _get_logs(self, request: web.Request) -> web.Response:
         """Return the last ~200 lines of logs if a log file is in use.
 
@@ -1313,6 +1318,13 @@ class LineTool:
         Falls back to a helpful message when stdout logging is in use
         (the standard Docker setup) since we can't read our own stdout.
         """
+        if os.environ.get("WEB_UI_ENABLE_LOGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return web.json_response({
+                "ok": False,
+                "message": "Log access is disabled. Set WEB_UI_ENABLE_LOGS=true to enable this endpoint.",
+                "lines": [],
+            })
+
         log_path = os.environ.get("LOG_FILE") or "/config/camproxy.log"
         try:
             if not Path(log_path).exists():
@@ -1328,7 +1340,7 @@ class LineTool:
                 size = f.tell()
                 f.seek(max(0, size - 32_768))
                 tail = f.read().decode("utf-8", errors="replace")
-            lines = tail.splitlines()[-200:]
+            lines = [self._redact_log_line(line) for line in tail.splitlines()[-200:]]
             return web.json_response({"ok": True, "lines": lines})
         except OSError as exc:
             return web.json_response({"ok": False, "message": str(exc), "lines": []})
