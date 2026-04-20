@@ -180,7 +180,10 @@ INDEX_HTML = r"""<!doctype html>
   <!-- ═══ STATUS TAB ═══ -->
   <div id="status" class="pane active">
     <div class="card">
-      <div class="card-header"><h3>System</h3></div>
+      <div class="card-header">
+        <h3>System</h3>
+        <button id="restart-btn" class="btn-danger btn-sm">Restart Container</button>
+      </div>
       <div class="status-grid">
         <div class="status-item"><span class="status-label">UniFi Host</span><span id="s-host" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
@@ -288,6 +291,22 @@ function fmtUptime(s) {
   return m + 'm ' + (s % 60) + 's';
 }
 
+document.getElementById('restart-btn').addEventListener('click', async () => {
+  if (!confirm('Restart the container? All camera connections will be dropped temporarily.')) return;
+  try {
+    const resp = await fetch('/api/restart', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      document.getElementById('restart-btn').textContent = 'Restarting…';
+      document.getElementById('restart-btn').disabled = true;
+    } else {
+      alert('Restart failed: ' + (data.message || 'unknown error'));
+    }
+  } catch (e) {
+    alert('Restart request failed — the container may already be stopping.');
+  }
+});
+
 async function refreshStatus() {
   try {
     const data = await (await fetch('/api/status')).json();
@@ -333,8 +352,10 @@ async function refreshStatus() {
     } else {
       let html = '<div class="cam-row header"><span>Name</span><span>Status</span><span>Frames</span><span>Persons</span><span>Vehicles</span></div>';
       for (const c of cams) {
-        const dotClass = c.disabled ? 'disabled' : (c.connected ? 'on' : 'off');
-        const label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
+        const hasError = !!c.error;
+        const dotClass = c.disabled ? 'disabled' : (hasError ? 'off' : (c.connected ? 'on' : 'off'));
+        let label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
+        if (hasError && !c.disabled) label = 'Error';
         html += '<div class="cam-row">' +
           '<span><span class="dot ' + dotClass + '"></span>' + esc(c.name) + '</span>' +
           '<span>' + label + '</span>' +
@@ -342,6 +363,9 @@ async function refreshStatus() {
           '<span>' + (c.detections_person || 0).toLocaleString() + '</span>' +
           '<span>' + (c.detections_vehicle || 0).toLocaleString() + '</span>' +
           '</div>';
+        if (hasError) {
+          html += '<div style="grid-column:1/-1;padding:4px 0 8px 14px;font-size:12px;color:#f87;">⚠ ' + esc(c.error) + '</div>';
+        }
       }
       camDiv.innerHTML = html;
     }
@@ -696,10 +720,12 @@ class LineTool:
         registry: Dict[str, "AIPortCamera"],
         config: dict,
         config_path: Optional[str] = None,
+        error_registry: Optional[Dict[str, str]] = None,
     ):
         self.registry = registry
         self.config = config
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
+        self._error_registry = error_registry or {}
         self._start_time = time.monotonic()
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
@@ -712,6 +738,7 @@ class LineTool:
         self.app.router.add_delete("/api/lines/{name}/{idx}", self._delete_line)
         self.app.router.add_post("/api/test-rtsp", self._test_rtsp)
         self.app.router.add_get("/api/status", self._get_status)
+        self.app.router.add_post("/api/restart", self._restart_container)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -957,6 +984,7 @@ class LineTool:
                 "frames_analysed": 0,
                 "detections_person": 0,
                 "detections_vehicle": 0,
+                "error": self._error_registry.get(name),
             }
             live = self.registry.get(name)
             if live and hasattr(live, "ai_engine"):
@@ -1058,6 +1086,24 @@ class LineTool:
             return web.json_response({"ok": False, "message": str(exc)})
 
         return web.json_response({"ok": ok, "message": message})
+
+    async def _restart_container(self, request: web.Request) -> web.Response:
+        """Trigger a graceful container restart by exiting the process.
+
+        Docker (or any orchestrator with restart policy) will restart the
+        container automatically. We respond first, then schedule the exit.
+        """
+        logger.info("Restart requested via web UI — shutting down process")
+
+        async def _delayed_exit():
+            await asyncio.sleep(0.5)  # give the HTTP response time to flush
+            # os._exit is intentional: sys.exit raises SystemExit which asyncio
+            # catches and suppresses inside a running event loop. We need the
+            # process to actually terminate so the orchestrator restarts it.
+            os._exit(0)
+
+        asyncio.ensure_future(_delayed_exit())
+        return web.json_response({"ok": True, "message": "Restarting…"})
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
