@@ -34,7 +34,7 @@ import threading
 import time
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Callable, Dict, Optional
 
 import cv2
 import numpy as np
@@ -203,6 +203,9 @@ INDEX_HTML = r"""<!doctype html>
 
   <!-- ═══ STATUS TAB ═══ -->
   <div id="status" class="pane active">
+    <div id="lockout-banner" class="banner warn">
+      <!-- filled by refreshStatus when auth lockout is active -->
+    </div>
     <div class="card">
       <div class="card-header">
         <h3>System</h3>
@@ -211,10 +214,22 @@ INDEX_HTML = r"""<!doctype html>
       <div class="status-grid">
         <div class="status-item"><span class="status-label">UniFi Host</span><span id="s-host" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">API key</span><span id="s-apikey" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Memory (RSS)</span><span id="s-mem" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Python</span><span id="s-python" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Build</span><span id="s-build" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Built</span><span id="s-build-time" class="status-value">—</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>Adoption</h3></div>
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">Auth state</span><span id="s-auth" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Token refreshes</span><span id="s-refresh-count" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Last refresh</span><span id="s-refresh-ok" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Last failure</span><span id="s-refresh-err" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Current token</span><span id="s-token" class="status-value">—</span></div>
       </div>
     </div>
     <div class="card">
@@ -381,6 +396,15 @@ function fmtUptime(s) {
   return m + 'm ' + (s % 60) + 's';
 }
 
+function fmtAgo(epoch) {
+  if (!epoch) return '—';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
 document.getElementById('restart-btn').addEventListener('click', async () => {
   if (!confirm('Restart the container? All camera connections will be dropped temporarily.')) return;
   try {
@@ -403,8 +427,44 @@ async function refreshStatus() {
 
     document.getElementById('s-host').textContent = data.unifi_host || '—';
     document.getElementById('s-user').textContent = data.unifi_username || '—';
+    document.getElementById('s-apikey').textContent = data.unifi_has_api_key ? 'set' : 'not set';
     document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
+    document.getElementById('s-mem').textContent =
+      data.memory_rss_mb != null ? data.memory_rss_mb.toFixed(1) + ' MB' : '—';
     document.getElementById('s-python').textContent = data.python_version || '—';
+
+    // Auth-lockout banner — only visible when Protect has rejected us
+    // (bad creds) or rate-limited (429).
+    const lockout = data.auth_lockout || {};
+    const lockBanner = document.getElementById('lockout-banner');
+    if (lockout.active) {
+      const m = Math.ceil(lockout.remaining_seconds / 60);
+      lockBanner.innerHTML = '<strong>⚠ Auth paused:</strong> ' +
+        esc(lockout.reason) + ' — retrying in ~' + m + ' min. ' +
+        'Fix credentials in the UniFi tab and click Test login.';
+      lockBanner.style.display = 'block';
+    } else {
+      lockBanner.style.display = 'none';
+    }
+
+    // Adoption card — proves token rotation is actually happening.
+    const ad = data.adoption || {};
+    document.getElementById('s-auth').textContent =
+      lockout.active ? 'Paused (' + Math.ceil(lockout.remaining_seconds / 60) + ' min)' : 'OK';
+    document.getElementById('s-refresh-count').textContent = (ad.refresh_ok_count != null ? ad.refresh_ok_count : 0);
+    document.getElementById('s-refresh-ok').textContent = fmtAgo(ad.last_ok_epoch);
+    const errEl = document.getElementById('s-refresh-err');
+    if (ad.last_err_epoch) {
+      const st = ad.last_err_status ? ' (HTTP ' + ad.last_err_status + ')' : '';
+      errEl.textContent = fmtAgo(ad.last_err_epoch) + st;
+      errEl.title = ad.last_err_msg || '';
+      errEl.style.color = '#f87';
+    } else {
+      errEl.textContent = 'none';
+      errEl.title = '';
+      errEl.style.color = '';
+    }
+    document.getElementById('s-token').textContent = ad.current_token_masked || '—';
 
     // Build info — so users can tell which image is actually running
     const build = data.build || {};
@@ -1067,6 +1127,26 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+def _get_process_rss_mb() -> Optional[float]:
+    """Resident set size for this process, in MB. Linux-first (reads
+    /proc/self/status), falls back to resource.getrusage. Returns None
+    if we can't tell — keeps the UI graceful on odd platforms."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return round(kb / 1024, 1)
+    except (OSError, ValueError):
+        pass
+    try:
+        import resource
+        # ru_maxrss is KB on Linux, bytes on macOS — container is Linux.
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except (ImportError, OSError):
+        return None
+
+
 def _grab_rtsp_frame(
     rtsp_url: str,
     timeout_s: float = 10.0,
@@ -1123,11 +1203,18 @@ class LineTool:
         config: dict,
         config_path: Optional[str] = None,
         error_registry: Optional[Dict[str, str]] = None,
+        adoption_probe: Optional[Callable[[], dict]] = None,
+        lockout_probe: Optional[Callable[[], dict]] = None,
     ):
         self.registry = registry
         self.config = config
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
         self._error_registry = error_registry or {}
+        # Callables injected by main.py that return snapshots of adoption-
+        # token refresh stats and the auth cooldown. Kept as callables (not
+        # dicts) so the Status tab always sees fresh values on each poll.
+        self._adoption_probe = adoption_probe
+        self._lockout_probe = lockout_probe
         self._start_time = time.monotonic()
         # Short-lived cache of last-good JPEG per camera so repeated Refresh
         # clicks (and the Lines-tab auto-refresh poller) don't re-open RTSP
@@ -1601,15 +1688,19 @@ class LineTool:
         payload = {
             "unifi_host": unifi_cfg.get("host", ""),
             "unifi_username": unifi_cfg.get("username", ""),
+            "unifi_has_api_key": bool(unifi_cfg.get("api_key")),
             "cameras_configured": len(self.config.get("cameras", [])),
             "cameras_running": len(self.registry),
             "inference_device": inference_device,
             "cpu_load": round(cpu_load, 2) if cpu_load is not None else None,
+            "memory_rss_mb": _get_process_rss_mb(),
             "gpu": gpu_info,
             "uptime_seconds": uptime_secs,
             "python_version": platform.python_version(),
             "cameras": cam_statuses,
             "build": get_build_info(),
+            "adoption": self._adoption_probe() if self._adoption_probe else {},
+            "auth_lockout": self._lockout_probe() if self._lockout_probe else {},
         }
         return web.json_response(payload)
 

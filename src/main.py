@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -306,6 +307,46 @@ def _validate_camera_cfg(cam_cfg: dict) -> str | None:
 _auth_lockout_until: float = 0.0
 _auth_lockout_reason: str = ""
 
+# Adoption-token refresh stats. Exposed to the Status tab via the getters
+# below so the user can see token rotation working (or not).
+_token_refresh_ok_count: int = 0
+_token_refresh_last_ok_epoch: float = 0.0
+_token_refresh_last_err_epoch: float = 0.0
+_token_refresh_last_err_status: Optional[int] = None
+_token_refresh_last_err_msg: str = ""
+_token_refresh_last_value: str = ""
+
+
+def _mask_token(tok: str) -> str:
+    """Show only the first 6 + last 4 chars of a token; never full secret."""
+    if not tok:
+        return ""
+    if len(tok) <= 12:
+        return tok[:2] + "…"
+    return f"{tok[:6]}…{tok[-4:]}"
+
+
+def get_adoption_state() -> dict:
+    """Snapshot of adoption-token refresh stats (for web UI)."""
+    return {
+        "refresh_ok_count": _token_refresh_ok_count,
+        "last_ok_epoch": _token_refresh_last_ok_epoch or None,
+        "last_err_epoch": _token_refresh_last_err_epoch or None,
+        "last_err_status": _token_refresh_last_err_status,
+        "last_err_msg": _token_refresh_last_err_msg or None,
+        "current_token_masked": _mask_token(_token_refresh_last_value),
+    }
+
+
+def get_auth_lockout_state() -> dict:
+    """Snapshot of the auth cooldown (for web UI)."""
+    remaining = _auth_lockout_remaining()
+    return {
+        "active": remaining > 0,
+        "remaining_seconds": int(remaining),
+        "reason": _auth_lockout_reason if remaining > 0 else "",
+    }
+
 # How long to back off after each kind of auth failure. 429s are Protect
 # explicitly telling us "wait"; 401/403 just means the creds are wrong
 # and no amount of retrying will help until the user intervenes.
@@ -362,13 +403,21 @@ async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
     if not host or not (api_key or (username and password)):
         return None
 
+    global _token_refresh_ok_count, _token_refresh_last_ok_epoch
+    global _token_refresh_last_value
+    global _token_refresh_last_err_epoch, _token_refresh_last_err_status
+    global _token_refresh_last_err_msg
+
     try:
         async with UniFiProtectClient(
             host, username or "", password or "", api_key=api_key or "",
         ) as client:
-            return await client.fetch_adoption_token()
+            token = await client.fetch_adoption_token()
     except UniFiAuthError as exc:
         status = getattr(exc, "status", None)
+        _token_refresh_last_err_epoch = time.time()
+        _token_refresh_last_err_status = status
+        _token_refresh_last_err_msg = str(exc)
         if status == 429:
             _set_auth_lockout(
                 _AUTH_LOCKOUT_RATE_LIMIT,
@@ -395,6 +444,11 @@ async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
         else:
             logger.warning("Token refresh failed: %s", exc)
         return None
+
+    _token_refresh_ok_count += 1
+    _token_refresh_last_ok_epoch = time.time()
+    _token_refresh_last_value = token
+    return token
 
 
 async def run_camera(cam_cfg: dict, global_cfg: dict, token: str):
@@ -501,7 +555,9 @@ async def main():
     if web_cfg.get("enabled", True):
         port = int(web_cfg.get("port", 8091))
         tool = LineTool(camera_registry, cfg, config_path=config_path,
-                        error_registry=camera_errors)
+                        error_registry=camera_errors,
+                        adoption_probe=get_adoption_state,
+                        lockout_probe=get_auth_lockout_state)
         logger.info("Starting web UI on port %d", port)
         tasks.append(asyncio.create_task(tool.run(port)))
 
