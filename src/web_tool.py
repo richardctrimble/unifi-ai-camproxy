@@ -217,6 +217,8 @@ INDEX_HTML = r"""<!doctype html>
         <div class="status-item"><span class="status-label">API key</span><span id="s-apikey" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Memory (RSS)</span><span id="s-mem" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Disk (/config)</span><span id="s-disk" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Last heartbeat</span><span id="s-heartbeat" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Python</span><span id="s-python" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Build</span><span id="s-build" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Built</span><span id="s-build-time" class="status-value">—</span></div>
@@ -431,6 +433,30 @@ async function refreshStatus() {
     document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
     document.getElementById('s-mem').textContent =
       data.memory_rss_mb != null ? data.memory_rss_mb.toFixed(1) + ' MB' : '—';
+
+    // Disk — warn under 256 MB free
+    const disk = data.disk_config || {};
+    const diskEl = document.getElementById('s-disk');
+    if (disk.free_mb != null && disk.total_mb != null) {
+      diskEl.textContent = disk.free_mb + ' / ' + disk.total_mb + ' MB free';
+      diskEl.style.color = disk.free_mb < 256 ? '#f87' : '';
+    } else {
+      diskEl.textContent = '—';
+      diskEl.style.color = '';
+    }
+
+    // Heartbeat — warn if it hasn't advanced in ~10 min (interval is 5m)
+    const hb = data.heartbeat || {};
+    const hbEl = document.getElementById('s-heartbeat');
+    if (hb.last_epoch) {
+      const age = Math.floor(Date.now() / 1000 - hb.last_epoch);
+      hbEl.textContent = fmtAgo(hb.last_epoch);
+      hbEl.style.color = age > 600 ? '#f87' : '';
+    } else {
+      hbEl.textContent = 'not yet';
+      hbEl.style.color = '';
+    }
+
     document.getElementById('s-python').textContent = data.python_version || '—';
 
     // Auth-lockout banner — only visible when Protect has rejected us
@@ -530,6 +556,10 @@ async function refreshStatus() {
         const dotClass = c.disabled ? 'disabled' : (hasError ? 'off' : (c.connected ? 'on' : 'off'));
         let label = c.disabled ? 'Disabled' : (c.connected ? 'Connected' : 'Disconnected');
         if (hasError && !c.disabled) label = 'Error';
+        // Show reconnect count — flapping cameras stand out.
+        if (c.reconnects && !c.disabled) {
+          label += ' <span style="color:#fa4;font-size:12px;">×' + c.reconnects + '</span>';
+        }
 
         const dev = c.device_active || c.device_requested || '—';
         let devCls = 'dev-tag';
@@ -1127,6 +1157,24 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+def _get_config_disk(path: str = "/config") -> dict:
+    """Free / total MB for the config volume. Empty dict if unavailable.
+
+    Useful when log rotation falls behind or the user stashes large
+    test videos under /config and doesn't realise disk is full.
+    """
+    import shutil
+    try:
+        usage = shutil.disk_usage(path)
+        return {
+            "path": path,
+            "free_mb": usage.free // (1024 * 1024),
+            "total_mb": usage.total // (1024 * 1024),
+        }
+    except OSError:
+        return {}
+
+
 def _get_process_rss_mb() -> Optional[float]:
     """Resident set size for this process, in MB. Linux-first (reads
     /proc/self/status), falls back to resource.getrusage. Returns None
@@ -1203,18 +1251,23 @@ class LineTool:
         config: dict,
         config_path: Optional[str] = None,
         error_registry: Optional[Dict[str, str]] = None,
+        reconnect_registry: Optional[Dict[str, int]] = None,
         adoption_probe: Optional[Callable[[], dict]] = None,
         lockout_probe: Optional[Callable[[], dict]] = None,
+        heartbeat_probe: Optional[Callable[[], dict]] = None,
     ):
         self.registry = registry
         self.config = config
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
         self._error_registry = error_registry or {}
+        self._reconnect_registry = reconnect_registry or {}
         # Callables injected by main.py that return snapshots of adoption-
-        # token refresh stats and the auth cooldown. Kept as callables (not
-        # dicts) so the Status tab always sees fresh values on each poll.
+        # token refresh stats, the auth cooldown and the heartbeat tick.
+        # Kept as callables (not dicts) so the Status tab always sees
+        # fresh values on each poll.
         self._adoption_probe = adoption_probe
         self._lockout_probe = lockout_probe
+        self._heartbeat_probe = heartbeat_probe
         self._start_time = time.monotonic()
         # Short-lived cache of last-good JPEG per camera so repeated Refresh
         # clicks (and the Lines-tab auto-refresh poller) don't re-open RTSP
@@ -1667,6 +1720,7 @@ class LineTool:
                 "last_inference_ms": None,
                 "last_detection_age_s": None,
                 "error": self._error_registry.get(name),
+                "reconnects": self._reconnect_registry.get(name, 0),
             }
             live = self.registry.get(name)
             if live and hasattr(live, "ai_engine"):
@@ -1694,6 +1748,7 @@ class LineTool:
             "inference_device": inference_device,
             "cpu_load": round(cpu_load, 2) if cpu_load is not None else None,
             "memory_rss_mb": _get_process_rss_mb(),
+            "disk_config": _get_config_disk(),
             "gpu": gpu_info,
             "uptime_seconds": uptime_secs,
             "python_version": platform.python_version(),
@@ -1701,6 +1756,7 @@ class LineTool:
             "build": get_build_info(),
             "adoption": self._adoption_probe() if self._adoption_probe else {},
             "auth_lockout": self._lockout_probe() if self._lockout_probe else {},
+            "heartbeat": self._heartbeat_probe() if self._heartbeat_probe else {},
         }
         return web.json_response(payload)
 

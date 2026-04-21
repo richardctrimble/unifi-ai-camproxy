@@ -29,6 +29,21 @@ camera_registry: Dict[str, AIPortCamera] = {}
 # name. The web tool reads this to display errors on the status page.
 camera_errors: Dict[str, str] = {}
 
+# Per-camera reconnect counters. Incremented every time run_camera()
+# catches an exception and retries. Lets the Status tab show which
+# cameras are flapping without having to scrape the logs.
+camera_reconnects: Dict[str, int] = {}
+
+# Wall-clock time of the last heartbeat_logger tick. When this stops
+# advancing the main event loop has wedged — the Status tab uses it as
+# a liveness indicator.
+_last_heartbeat_epoch: float = 0.0
+
+
+def get_heartbeat_state() -> dict:
+    """Snapshot of the heartbeat timestamp for the web UI."""
+    return {"last_epoch": _last_heartbeat_epoch or None}
+
 def _configure_logging() -> None:
     """Configure root logging.
 
@@ -205,9 +220,11 @@ async def heartbeat_logger() -> None:
     failures obvious — if the heartbeat keeps reporting 0 new frames
     for a camera, something is wrong even if no exception has been raised.
     """
+    global _last_heartbeat_epoch
     last_counts: dict[str, tuple[int, int]] = {}
     while True:
         await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+        _last_heartbeat_epoch = time.time()
         if not camera_registry:
             continue
         parts = []
@@ -475,6 +492,7 @@ async def run_camera(cam_cfg: dict, global_cfg: dict, token: str):
             raise
         except Exception as exc:
             camera_errors[cam_name] = str(exc)
+            camera_reconnects[cam_name] = camera_reconnects.get(cam_name, 0) + 1
             logger.error(
                 "Camera %s crashed: %s — retrying in %ds",
                 cam_name, exc, retry_delay,
@@ -549,6 +567,10 @@ async def main():
 
     tasks = []
 
+    # Heartbeat task always runs — it's the liveness indicator shown on
+    # the Status tab, and it's cheap (a 5-minute sleep loop).
+    tasks.append(asyncio.create_task(heartbeat_logger()))
+
     # 1. Start web UI first — it must be reachable even with zero cameras
     #    so users can add cameras via the Setup tab on first install.
     web_cfg = cfg.get("web_tool", {}) or {}
@@ -556,8 +578,10 @@ async def main():
         port = int(web_cfg.get("port", 8091))
         tool = LineTool(camera_registry, cfg, config_path=config_path,
                         error_registry=camera_errors,
+                        reconnect_registry=camera_reconnects,
                         adoption_probe=get_adoption_state,
-                        lockout_probe=get_auth_lockout_state)
+                        lockout_probe=get_auth_lockout_state,
+                        heartbeat_probe=get_heartbeat_state)
         logger.info("Starting web UI on port %d", port)
         tasks.append(asyncio.create_task(tool.run(port)))
 
@@ -631,7 +655,6 @@ async def main():
         for cam in valid_cameras
     )
     tasks.append(asyncio.create_task(auto_adopt_pending(cfg, valid_cameras)))
-    tasks.append(asyncio.create_task(heartbeat_logger()))
 
     # Use return_exceptions=True so one task failure doesn't kill the others.
     # Individual camera tasks already have their own retry logic.
