@@ -56,23 +56,29 @@ RUN pip install --no-cache-dir \
       torch torchvision
 
 # Intel compute runtime: Intel split their compute-runtime into two tracks
-# in 2024. Ship BOTH so we support every iGPU from Broadwell (Gen8) up to
-# Arc / Lunar Lake in a single image:
+# in 2024, and package names keep shifting across repo snapshots. We
+# split the install into two groups:
 #
-#   intel-opencl-icd                — OpenCL for Gen12+ (Tiger Lake/Alder
-#                                     Lake/Arc/Xe/Meteor Lake/Lunar Lake)
-#   intel-opencl-icd-legacy1        — OpenCL for Gen8–Gen11 (Broadwell,
-#                                     Skylake, Kaby/Coffee/Comet/Rocket
-#                                     Lake, Ice Lake) — e.g. UHD 610/620/
-#                                     630 on Pentium Gold / i3–i7 desktops
-#   intel-level-zero-gpu            — Level Zero backend for Gen12+
-#   intel-level-zero-gpu-legacy1    — Level Zero backend for Gen8–Gen11
-#   libze1 / ocl-icd-libopencl1     — the two shared loaders both tracks
-#                                     resolve through
+#   REQUIRED (must succeed, build fails otherwise)
+#     intel-opencl-icd     — modern OpenCL driver (Gen12+: Tiger Lake,
+#                            Alder Lake, Arc, Xe, Meteor/Lunar Lake)
+#     libze1               — Level Zero loader (shared by both tracks)
+#     ocl-icd-libopencl1   — OpenCL loader
 #
-# Legacy packages are best-effort (|| true) because Intel occasionally
-# renames them across releases; losing Gen9 support is better than a
-# broken image build.
+#   OPTIONAL (best-effort — build proceeds even if a given name isn't
+#   in the current Intel repo snapshot; we just lose that GPU tier's
+#   support for this image)
+#     intel-level-zero-gpu        — L0 plugin for Gen12+
+#     intel-opencl-icd-legacy1    — OpenCL for Gen8-Gen11 (Broadwell,
+#                                   Skylake, Kaby/Coffee/Comet/Rocket
+#                                   Lake, Ice Lake) — e.g. UHD 610/620/
+#                                   630 on Pentium Gold / older Core i*
+#     intel-level-zero-gpu-legacy1— L0 plugin for Gen8-Gen11
+#
+# The legacy packages live in a different repo channel on some snapshots,
+# and intel-level-zero-gpu has been in and out of `noble unified`
+# historically — putting them in the best-effort block keeps the build
+# green on whichever snapshot Intel ships this week.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget \
         gnupg \
@@ -85,16 +91,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
      && apt-get update \
      && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
-        intel-level-zero-gpu \
         libze1 \
         ocl-icd-libopencl1 \
-     && (apt-get install -y --no-install-recommends \
-            intel-opencl-icd-legacy1 \
-            intel-level-zero-gpu-legacy1 \
-         && echo "OK: Gen8-11 (legacy) iGPU packages installed" \
-         || echo "WARN: Intel repo has no legacy (Gen8-11) packages in this snapshot") \
-     && dpkg -l | grep -E 'intel-(opencl|level-zero)' || true \
-     && ls /etc/OpenCL/vendors/ 2>/dev/null || true \
+     && for pkg in intel-level-zero-gpu intel-opencl-icd-legacy1 intel-level-zero-gpu-legacy1; do \
+            if apt-get install -y --no-install-recommends "$pkg"; then \
+                echo "OK: installed $pkg"; \
+            else \
+                echo "WARN: $pkg not in current Intel repo snapshot (skipped)"; \
+            fi; \
+        done \
+     && echo "--- Installed Intel GPU drivers ---" \
+     && (dpkg -l | grep -E 'intel-(opencl|level-zero)|libze' || true) \
+     && echo "--- Registered OpenCL ICDs ---" \
+     && (ls /etc/OpenCL/vendors/ 2>/dev/null || true) \
      && apt-get purge -y --auto-remove wget gnupg \
      && rm -rf /var/lib/apt/lists/* \
      && pip install --no-cache-dir "openvino>=2024.0.0"
