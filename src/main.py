@@ -65,6 +65,13 @@ def _configure_logging() -> None:
     if level > logging.DEBUG:
         logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
+    # aiohttp's per-request access log ("GET /api/status 200 ...") fires
+    # on every Status-tab poll (every 3 s), which floods the logs and
+    # makes real events hard to spot. Silence it unless the user asked
+    # for DEBUG explicitly.
+    if level > logging.DEBUG:
+        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
 
 _configure_logging()
 logger = logging.getLogger("camproxy")
