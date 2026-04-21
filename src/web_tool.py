@@ -137,6 +137,19 @@ INDEX_HTML = r"""<!doctype html>
     }
     .banner.warn { background: #5f3a1e; border-color: #eb8225; }
 
+    /* UniFi tab — per-credential sections */
+    .unifi-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid #2a2a2a; }
+    .unifi-section h4 { margin: 0 0 4px 0; font-size: 15px; }
+    .unifi-section .hint { margin: 0 0 10px 0; }
+    .unifi-row { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .unifi-tag {
+      display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 3px;
+      background: #333; color: #ccc; font-size: 11px; font-weight: 600;
+      vertical-align: middle;
+    }
+    .unifi-tag.primary { background: #1e3a5f; color: #9bf; border: 1px solid #2563eb; }
+    .u-result-inline { font-size: 13px; color: #aaa; }
+
     /* Line tool */
     .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
     .stage {
@@ -259,29 +272,98 @@ INDEX_HTML = r"""<!doctype html>
     </div>
     <div class="card">
       <div class="card-header"><h3>UniFi Protect connection</h3></div>
-      <div class="hint" style="margin-bottom:10px;">
-        Credentials for your UDM / UDM Pro / UNVR. Use <em>one</em> of:
-        a Protect admin's <strong>API key</strong> (preferred on Protect 7.x —
-        Settings → Control Plane → Integrations → Create API Key),
-        a local Protect user (username + password),
-        or a pre-generated adoption token. Changes are written to <code>config.yml</code>.
+      <div class="hint" style="margin-bottom:14px;">
+        <strong>What each credential does on Protect 7.x:</strong>
+        <ol style="margin:6px 0 0 20px;padding:0;line-height:1.55;">
+          <li><strong>Username + password</strong> — <em>required for
+          normal operation.</em> The proxy uses these to log in at
+          <code>/api/auth/login</code> and fetch a fresh adoption token
+          before every reconnect. Protect 7.x consumes tokens on first
+          use, so without this, cameras drop after their initial
+          adoption and never recover.</li>
+          <li><strong>Adoption token</strong> — optional, stopgap.
+          Useful for a one-off manual adoption (e.g. testing) when
+          you'd rather not store a Protect password. Won't survive
+          reconnects on 7.x on its own.</li>
+          <li><strong>API key</strong> — optional, future-proofing.
+          Used only against the new <code>/integration/v1/*</code>
+          endpoints; does <em>not</em> unlock the legacy
+          <code>manage-payload</code> path we need for adoption, so it
+          cannot replace username + password today.</li>
+        </ol>
       </div>
+
+      <!-- Host is shared by every test below -->
       <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;max-width:640px;">
         <label>Host / IP</label>
         <input id="u-host" placeholder="192.168.1.1">
-        <label>API key</label>
-        <input id="u-apikey" placeholder="recommended on Protect 7.x">
-        <label>Username</label>
-        <input id="u-user" placeholder="local Protect username" autocomplete="username">
-        <label>Password</label>
-        <input id="u-pass" type="password" placeholder="(unchanged if left blank)" autocomplete="new-password">
-        <label>Adoption token</label>
-        <input id="u-token" placeholder="optional — overrides everything when set">
       </div>
-      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
-        <button id="u-test" class="btn-primary">Test login</button>
-        <button id="u-save" class="btn-primary">Save &amp; retry adoption</button>
-        <span id="u-result" style="align-self:center;font-size:13px;"></span>
+
+      <!-- ── Username + password (primary) ── -->
+      <div class="unifi-section">
+        <h4>1. Username + password <span class="unifi-tag primary">primary</span></h4>
+        <p class="hint">
+          Cookie login via <code>/api/auth/login</code>. Must be a UniFi OS
+          user with Protect admin access — local-only Protect accounts
+          created inside the Protect app do not work here.
+        </p>
+        <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;max-width:640px;">
+          <label>Username</label>
+          <input id="u-user" placeholder="UniFi OS username" autocomplete="username">
+          <label>Password</label>
+          <input id="u-pass" type="password" placeholder="(unchanged if left blank)" autocomplete="new-password">
+        </div>
+        <div class="unifi-row">
+          <button id="u-test-userpass" class="btn-primary btn-sm">Test username + password</button>
+          <span id="u-result-userpass" class="u-result-inline"></span>
+        </div>
+      </div>
+
+      <!-- ── Adoption token (optional) ── -->
+      <div class="unifi-section">
+        <h4>2. Adoption token <span class="unifi-tag">optional</span></h4>
+        <p class="hint">
+          Tokens are one-shot on Protect 7.x so we can't validate one
+          in isolation — trying it would consume it. Clicking
+          <em>Fetch fresh token</em> uses your username + password to
+          pull a new one from Protect and shows a masked preview so
+          you know the fetch path works. If you paste a value here
+          and Save, it overrides the auto-fetched one on the next
+          camera restart.
+        </p>
+        <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;max-width:640px;">
+          <label>Adoption token</label>
+          <input id="u-token" placeholder="(unchanged if left blank)">
+        </div>
+        <div class="unifi-row">
+          <button id="u-fetch-token" class="btn-primary btn-sm">Fetch fresh token</button>
+          <span id="u-result-token" class="u-result-inline"></span>
+        </div>
+      </div>
+
+      <!-- ── API key (optional) ── -->
+      <div class="unifi-section">
+        <h4>3. API key <span class="unifi-tag">optional</span></h4>
+        <p class="hint">
+          Generate under <em>Settings → Control Plane → Integrations →
+          Create API Key</em>. Tested against
+          <code>/proxy/protect/integration/v1/nvrs</code>. Does not
+          help with adoption — only needed if you plan to use the
+          integration API for other purposes.
+        </p>
+        <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;max-width:640px;">
+          <label>API key</label>
+          <input id="u-apikey" placeholder="(unchanged if left blank)">
+        </div>
+        <div class="unifi-row">
+          <button id="u-test-apikey" class="btn-primary btn-sm">Test API key</button>
+          <span id="u-result-apikey" class="u-result-inline"></span>
+        </div>
+      </div>
+
+      <div style="margin-top:18px;border-top:1px solid #333;padding-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button id="u-save" class="btn-primary">Save to config.yml</button>
+        <span id="u-result" style="font-size:13px;"></span>
       </div>
     </div>
   </div>
@@ -1033,34 +1115,23 @@ function setUnifiResult(ok, msg) {
   uResult.style.color = ok ? '#4c4' : '#f87';
 }
 
-async function loadUnifiConfig() {
-  try {
-    const data = await (await fetch('/api/unifi')).json();
-    uHost.value = data.host || '';
-    uUser.value = data.username || '';
-    uPass.value = '';
-    uPass.placeholder = data.has_password ? '(unchanged — leave blank to keep)' : 'Protect password';
-    uApiKey.value = '';
-    uApiKey.placeholder = data.has_api_key
-      ? '(unchanged — leave blank to keep)'
-      : 'recommended on Protect 7.x';
-    uToken.value = '';
-    uToken.placeholder = data.has_token
-      ? '(unchanged — leave blank to keep)'
-      : 'optional — overrides everything when set';
-  } catch (e) {
-    setUnifiResult(false, 'Could not load current UniFi config');
-  }
+function setSectionResult(id, state, msg) {
+  // state: 'ok' | 'err' | 'pending'
+  const el = document.getElementById(id);
+  if (!el) return;
+  const prefix = state === 'ok' ? '✓ ' : state === 'err' ? '✗ ' : '⋯ ';
+  el.textContent = prefix + msg;
+  el.style.color = state === 'ok' ? '#4c4' : state === 'err' ? '#f87' : '#aaa';
 }
 
-document.getElementById('u-test').addEventListener('click', async () => {
-  setUnifiResult(true, 'Testing…');
-  uResult.style.color = '#aaa';
+async function runUnifiTest(mode, resultId) {
+  setSectionResult(resultId, 'pending', 'Testing…');
   try {
     const resp = await fetch('/api/test-unifi', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        mode: mode,
         host: uHost.value.trim(),
         api_key: uApiKey.value.trim(),
         username: uUser.value.trim(),
@@ -1068,11 +1139,39 @@ document.getElementById('u-test').addEventListener('click', async () => {
       }),
     });
     const data = await resp.json();
-    setUnifiResult(!!data.ok, data.message || (data.ok ? 'Login succeeded' : 'Login failed'));
+    setSectionResult(resultId, data.ok ? 'ok' : 'err',
+      data.message || (data.ok ? 'OK' : 'Failed'));
   } catch (e) {
-    setUnifiResult(false, 'Request failed');
+    setSectionResult(resultId, 'err', 'Request failed');
   }
-});
+}
+
+async function loadUnifiConfig() {
+  try {
+    const data = await (await fetch('/api/unifi')).json();
+    uHost.value = data.host || '';
+    uUser.value = data.username || '';
+    uPass.value = '';
+    uPass.placeholder = data.has_password ? '(unchanged — leave blank to keep)' : 'UniFi OS password';
+    uApiKey.value = '';
+    uApiKey.placeholder = data.has_api_key
+      ? '(unchanged — leave blank to keep)'
+      : 'optional — Protect 7.x integration API';
+    uToken.value = '';
+    uToken.placeholder = data.has_token
+      ? '(unchanged — leave blank to keep)'
+      : 'optional — one-shot, used once and discarded';
+  } catch (e) {
+    setUnifiResult(false, 'Could not load current UniFi config');
+  }
+}
+
+document.getElementById('u-test-userpass').addEventListener('click', () =>
+  runUnifiTest('userpass', 'u-result-userpass'));
+document.getElementById('u-test-apikey').addEventListener('click', () =>
+  runUnifiTest('api_key', 'u-result-apikey'));
+document.getElementById('u-fetch-token').addEventListener('click', () =>
+  runUnifiTest('fetch_token', 'u-result-token'));
 
 document.getElementById('u-save').addEventListener('click', async () => {
   setUnifiResult(true, 'Saving…');
@@ -1998,13 +2097,16 @@ class LineTool:
         })
 
     async def _test_unifi(self, request: web.Request) -> web.Response:
-        """Try the supplied credentials against the Protect controller.
+        """Test one of the three UniFi credential types against Protect.
 
-        Prefers the API-key path (``GET /proxy/protect/integration/v1/nvrs``
-        with ``X-API-KEY``) when a key is supplied, since on Protect 7.x the
-        legacy username/password flow works but still can't fetch the
-        adoption token — and the API-key path is the only way we can
-        verify against the new integration API at all.
+        Dispatched by the ``mode`` field in the request body:
+
+          * ``"userpass"``    — cookie-login via ``/api/auth/login``.
+          * ``"api_key"``     — GET ``/proxy/protect/integration/v1/nvrs``
+                                with ``X-API-KEY``.
+          * ``"fetch_token"`` — runs the manage-payload flow (requires
+                                username + password) and returns a masked
+                                preview of the resulting adoption token.
 
         Blank password / api_key means "use the stored value" so the user
         can re-test after only changing the host.
@@ -2014,6 +2116,7 @@ class LineTool:
         except Exception:
             return web.Response(status=400, text="invalid JSON")
 
+        mode = (body.get("mode") or "").strip() or "userpass"
         host = (body.get("host") or "").strip()
         if not host:
             return web.json_response({"ok": False, "message": "Host is required"})
@@ -2021,56 +2124,71 @@ class LineTool:
         stored = self.config.get("unifi", {}) or {}
         api_key = (body.get("api_key") or "").strip() or (stored.get("api_key") or "")
         username = (body.get("username") or "").strip()
+        if not username:
+            username = stored.get("username") or ""
         password = body.get("password") or ""
         if not password:
             password = stored.get("password") or ""
 
-        # Prefer API key — it's the new canonical auth on Protect 7.x.
-        if api_key:
-            base = host if host.startswith("http") else f"https://{host}"
-            url = f"{base}/proxy/protect/integration/v1/nvrs"
-            try:
-                connector = aiohttp.TCPConnector(ssl=False)
-                timeout = aiohttp.ClientTimeout(total=10)
-                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as s:
-                    async with s.get(url, headers={"X-API-KEY": api_key}) as r:
-                        if r.status == 200:
-                            return web.json_response(
-                                {"ok": True, "message": "API key accepted — integration API reachable"}
-                            )
-                        if r.status in (401, 403):
-                            return web.json_response(
-                                {"ok": False, "message": f"API key rejected (HTTP {r.status})"}
-                            )
-                        if r.status == 404:
-                            return web.json_response(
-                                {"ok": False, "message": (
-                                    "Integration API not found (HTTP 404). Upgrade Protect to "
-                                    "7.x+, or create the API key under Settings → Control Plane → "
-                                    "Integrations.")}
-                            )
-                        body_text = (await r.text())[:200]
-                        return web.json_response(
-                            {"ok": False, "message": f"HTTP {r.status}: {body_text}"}
-                        )
-            except aiohttp.ClientError as exc:
-                return web.json_response({"ok": False, "message": f"Could not reach {host}: {exc}"})
-            except Exception as exc:
-                return web.json_response({"ok": False, "message": f"Unexpected error: {exc}"})
+        if mode == "api_key":
+            return await self._test_api_key(host, api_key)
+        if mode == "userpass":
+            return await self._test_userpass(host, username, password)
+        if mode == "fetch_token":
+            return await self._test_fetch_token(host, username, password, api_key)
 
-        # Fall back to username/password.
+        return web.json_response(
+            {"ok": False, "message": f"Unknown test mode: {mode}"}
+        )
+
+    @staticmethod
+    async def _test_api_key(host: str, api_key: str) -> web.Response:
+        if not api_key:
+            return web.json_response(
+                {"ok": False, "message": "No API key set (and nothing stored)"}
+            )
+        base = host if host.startswith("http") else f"https://{host}"
+        url = f"{base}/proxy/protect/integration/v1/nvrs"
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as s:
+                async with s.get(url, headers={"X-API-KEY": api_key}) as r:
+                    if r.status == 200:
+                        return web.json_response(
+                            {"ok": True, "message": "API key accepted — integration API reachable"}
+                        )
+                    if r.status in (401, 403):
+                        return web.json_response(
+                            {"ok": False, "message": f"API key rejected (HTTP {r.status})"}
+                        )
+                    if r.status == 404:
+                        return web.json_response(
+                            {"ok": False, "message": (
+                                "Integration API not found (HTTP 404). Upgrade Protect to "
+                                "7.x+, or create the API key under Settings → Control Plane → "
+                                "Integrations.")}
+                        )
+                    body_text = (await r.text())[:200]
+                    return web.json_response(
+                        {"ok": False, "message": f"HTTP {r.status}: {body_text}"}
+                    )
+        except aiohttp.ClientError as exc:
+            return web.json_response({"ok": False, "message": f"Could not reach {host}: {exc}"})
+        except Exception as exc:
+            return web.json_response({"ok": False, "message": f"Unexpected error: {exc}"})
+
+    @staticmethod
+    async def _test_userpass(host: str, username: str, password: str) -> web.Response:
         if not username:
             return web.json_response(
-                {"ok": False, "message": "Provide an API key, or username + password"}
+                {"ok": False, "message": "Username required"}
             )
         if not password:
             return web.json_response(
                 {"ok": False, "message": "Password required (no stored value)"}
             )
-
-        # Import here to avoid a circular import on module load.
         from unifi_auth import UniFiProtectClient, UniFiAuthError
-
         try:
             async with UniFiProtectClient(host, username, password):
                 pass
@@ -2080,7 +2198,36 @@ class LineTool:
             return web.json_response(
                 {"ok": False, "message": f"Unexpected error: {exc}"}
             )
-        return web.json_response({"ok": True, "message": "Login succeeded (username/password)"})
+        return web.json_response({"ok": True, "message": "Login succeeded"})
+
+    @staticmethod
+    async def _test_fetch_token(host: str, username: str, password: str,
+                                api_key: str) -> web.Response:
+        """Log in and run the manage-payload fetch, returning a masked preview."""
+        if not (username and password):
+            return web.json_response(
+                {"ok": False, "message": (
+                    "Need username + password to fetch a token — "
+                    "the manage-payload endpoint rejects API-key auth.")
+                },
+            )
+        from unifi_auth import UniFiProtectClient, UniFiAuthError
+        try:
+            async with UniFiProtectClient(
+                host, username, password, api_key=api_key or "",
+            ) as client:
+                token = await client.fetch_adoption_token()
+        except UniFiAuthError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "message": f"Unexpected error: {exc}"}
+            )
+
+        masked = (token[:6] + "…" + token[-4:]) if len(token) > 12 else (token[:2] + "…")
+        return web.json_response(
+            {"ok": True, "message": f"Fetched fresh token: {masked}"}
+        )
 
     async def _restart_container(self, request: web.Request) -> web.Response:
         """Trigger a graceful container restart by exiting the process.
