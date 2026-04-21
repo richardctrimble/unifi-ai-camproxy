@@ -43,6 +43,7 @@ import aiohttp
 from aiohttp import web
 
 from ai_engine import list_supported_devices, probe_available_devices
+from build_info import get_build_info
 
 if TYPE_CHECKING:
     from unifi_client import AIPortCamera
@@ -210,6 +211,8 @@ INDEX_HTML = r"""<!doctype html>
         <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Python</span><span id="s-python" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Build</span><span id="s-build" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Built</span><span id="s-build-time" class="status-value">—</span></div>
       </div>
     </div>
     <div class="card">
@@ -339,6 +342,18 @@ async function refreshStatus() {
     document.getElementById('s-user').textContent = data.unifi_username || '—';
     document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
     document.getElementById('s-python').textContent = data.python_version || '—';
+
+    // Build info — so users can tell which image is actually running
+    const build = data.build || {};
+    const buildEl = document.getElementById('s-build');
+    const sha = build.git_sha_short || 'unknown';
+    const ref = build.git_ref && build.git_ref !== 'unknown' ? ` (${build.git_ref})` : '';
+    if (build.git_sha && build.git_sha !== 'unknown') {
+      buildEl.innerHTML = `<a href="https://github.com/richardctrimble/unifi-ai-camproxy/commit/${build.git_sha}" target="_blank" rel="noopener" style="color:inherit;">${sha}${ref}</a>`;
+    } else {
+      buildEl.textContent = sha + ref;
+    }
+    document.getElementById('s-build-time').textContent = build.build_time || '—';
 
     // Inference
     const dev = data.inference_device || 'N/A';
@@ -1409,6 +1424,7 @@ class LineTool:
             "uptime_seconds": uptime_secs,
             "python_version": platform.python_version(),
             "cameras": cam_statuses,
+            "build": get_build_info(),
         }
         return web.json_response(payload)
 

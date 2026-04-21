@@ -117,6 +117,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY docker-entrypoint.py /app/
 COPY src/ /app/src/
 
+# Build metadata — surfaced in the startup banner and the Status tab
+# so users can tell at a glance which image is actually running
+# (otherwise "I pulled the new image, right?" becomes a painful
+# debugging session). Values are passed by the GitHub Actions
+# workflow (--build-arg GIT_SHA=... --build-arg BUILD_TIME=...).
+ARG GIT_SHA=unknown
+ARG GIT_REF=unknown
+ARG BUILD_TIME=unknown
+ENV APP_GIT_SHA=$GIT_SHA
+ENV APP_GIT_REF=$GIT_REF
+ENV APP_BUILD_TIME=$BUILD_TIME
+RUN printf '%s\n' \
+      "git_sha: ${GIT_SHA}" \
+      "git_ref: ${GIT_REF}" \
+      "build_time: ${BUILD_TIME}" \
+      > /app/BUILD_INFO
+
 # Pre-download YOLOv8n model so first run is fast
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 

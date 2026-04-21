@@ -12,6 +12,7 @@ import yaml
 
 from ai_engine import probe_available_devices
 from auto_config import detect_local_ip, generate_mac
+from build_info import get_build_info
 from cert_gen import ensure_cert
 from unifi_auth import UniFiAuthError, UniFiProtectClient
 from unifi_client import AIPortCamera
@@ -91,7 +92,11 @@ def log_startup_banner() -> None:
     except metadata.PackageNotFoundError:
         version = "unknown"
 
+    build = get_build_info()
+
     logger.info("─── unifi-ai-camproxy starting ──────────────────────────────")
+    logger.info("Build: %s (ref: %s) @ %s",
+                build["git_sha_short"], build["git_ref"], build["build_time"])
     logger.info("Platform: %s %s / Python %s",
                 platform.system(), platform.machine(), platform.python_version())
     logger.info("Ultralytics: %s", version)
