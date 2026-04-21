@@ -862,10 +862,12 @@ def _grab_rtsp_frame(rtsp_url: str, timeout_s: float = 10.0) -> bytes:
     Used as a last-resort fallback for the Lines-tab frame endpoint when the
     Protect stream hasn't started yet.
     """
-    cap = cv2.VideoCapture(rtsp_url)
+    cap = cv2.VideoCapture()
     cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_s * 1000)
     cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_s * 1000)
     try:
+        if not cap.open(rtsp_url):
+            return b""
         ret, frame = cap.read()
         if ret and frame is not None:
             return _encode_jpeg(frame)
