@@ -735,7 +735,7 @@ async function loadLineCameras() {
 async function loadLineCamera() {
   const name = camSel.value;
   if (!name) return;
-  showFrameMsg('Loading frame\u2026');
+  showFrameMsg('Loading frame…');
   frame.src = `/api/frame/${encodeURIComponent(name)}?t=${Date.now()}`;
   try {
     existingLines = await (await fetch(`/api/lines/${encodeURIComponent(name)}`)).json();
@@ -747,7 +747,7 @@ async function loadLineCamera() {
 
 function refreshFrame() {
   if (camSel.value) {
-    showFrameMsg('Loading frame\u2026');
+    showFrameMsg('Loading frame…');
     frame.src = `/api/frame/${encodeURIComponent(camSel.value)}?t=${Date.now()}`;
   }
 }
