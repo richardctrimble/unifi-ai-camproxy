@@ -66,10 +66,13 @@ class UniFiProtectClient:
         connector = aiohttp.TCPConnector(ssl=False)
         self._session = aiohttp.ClientSession(connector=connector)
         try:
-            # API key auth skips login entirely — the key goes on every
-            # request via X-API-KEY. We still need a session for the
-            # aiohttp calls, but there's no login flow to run.
-            if not self.api_key:
+            # Always log in when we have username + password. The legacy
+            # /proxy/protect/api/* endpoints (notably manage-payload) only
+            # accept cookie + CSRF auth and reject X-API-KEY, so we need
+            # the session cookie regardless of whether an api_key is set.
+            # The api_key (if any) is attached via _headers() and will be
+            # picked up by the integration API.
+            if self.username and self.password:
                 await self._login()
         except BaseException:
             # If login fails, __aexit__ never runs, so we'd leak the session
