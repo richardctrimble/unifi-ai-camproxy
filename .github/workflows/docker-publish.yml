@@ -49,7 +49,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -61,6 +61,40 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # needed so we can list existing calver tags
+
+      # Compute YYYY.M.R for this build, where R increments per month.
+      # Only runs on push to main so the tag is only created once per
+      # merge; tag pushes and PRs skip this and just use whatever is
+      # already present.
+      - name: Compute calver tag
+        id: calver
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          YEAR=$(date -u +%Y)
+          MONTH=$(date -u +%-m)
+          PREFIX="${YEAR}.${MONTH}."
+          # Count existing tags for this YYYY.M and bump by one.
+          git fetch --tags --quiet
+          LAST=$(git tag --list "${PREFIX}*" \
+                 | awk -F. -v p="${PREFIX}" 'index($0, p)==1 {print $3}' \
+                 | sort -n | tail -1)
+          NEXT=$(( ${LAST:-0} + 1 ))
+          TAG="${PREFIX}${NEXT}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Computed calver tag: ${TAG}"
+
+      - name: Create and push calver tag
+        if: steps.calver.outputs.tag
+        env:
+          TAG: ${{ steps.calver.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG" "${{ github.sha }}"
+          git push origin "$TAG"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -83,6 +117,7 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.calver.outputs.tag }},enable=${{ steps.calver.outputs.tag != '' }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -96,7 +131,7 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             GIT_SHA=${{ github.sha }}
-            GIT_REF=${{ github.ref_name }}
+            GIT_REF=${{ steps.calver.outputs.tag || github.ref_name }}
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
 
   # ── NVIDIA CUDA image ──────────────────────────────────────────────────────

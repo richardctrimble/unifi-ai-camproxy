@@ -55,56 +55,42 @@ RUN pip install --no-cache-dir \
       --index-url https://download.pytorch.org/whl/cpu \
       torch torchvision
 
-# Intel compute runtime: Intel split their compute-runtime into two tracks
-# in 2024, and package names keep shifting across repo snapshots. We
-# split the install into two groups:
+# Intel compute runtime: we use Debian's own intel-opencl-icd rather
+# than Intel's "noble unified" apt repo because:
 #
-#   REQUIRED (must succeed, build fails otherwise)
-#     intel-opencl-icd     — modern OpenCL driver (Gen12+: Tiger Lake,
-#                            Alder Lake, Arc, Xe, Meteor/Lunar Lake)
-#     libze1               — Level Zero loader (shared by both tracks)
-#     ocl-icd-libopencl1   — OpenCL loader
+#   * Debian bookworm ships intel-opencl-icd 22.43 (compute-runtime 22.43),
+#     which still bundles Gen8–Gen12 support in a single package —
+#     every iGPU from Broadwell through Alder Lake-N (so every CPU
+#     anyone's likely to run TrueNAS on: Pentium Gold G6xxx, Celeron
+#     J-series, N100/N200/N305, UHD 610/620/630, i3–i7 iGPUs).
+#   * Intel's modern `noble unified` repo dropped Gen8–Gen11 support
+#     in 2024 and split the legacy drivers into -legacy1 packages
+#     that are not reliably present in that channel — the build
+#     kept going green while silently leaving Gen9 users without
+#     a usable driver.
 #
-#   OPTIONAL (best-effort — build proceeds even if a given name isn't
-#   in the current Intel repo snapshot; we just lose that GPU tier's
-#   support for this image)
-#     intel-level-zero-gpu        — L0 plugin for Gen12+
-#     intel-opencl-icd-legacy1    — OpenCL for Gen8-Gen11 (Broadwell,
-#                                   Skylake, Kaby/Coffee/Comet/Rocket
-#                                   Lake, Ice Lake) — e.g. UHD 610/620/
-#                                   630 on Pentium Gold / older Core i*
-#     intel-level-zero-gpu-legacy1— L0 plugin for Gen8-Gen11
+# Trade-off: Arc / Xe discrete GPUs get the older 22.43 driver rather
+# than the latest. They still work, just without the newest perf
+# tuning — acceptable because practically no one runs those in a
+# TrueNAS box. A future opt-in Dockerfile could add the modern
+# driver if that ever matters.
 #
-# The legacy packages live in a different repo channel on some snapshots,
-# and intel-level-zero-gpu has been in and out of `noble unified`
-# historically — putting them in the best-effort block keeps the build
-# green on whichever snapshot Intel ships this week.
+# libze1 (Level Zero loader) is still from Debian's repo — OpenVINO
+# uses it for the L0 path. intel-level-zero-gpu (the L0 GPU plugin)
+# is best-effort since it's not in every Debian snapshot; OpenVINO
+# falls back to OpenCL when L0 isn't available, which is fine for
+# Gen9–Gen11 anyway.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget \
-        gnupg \
-     && mkdir -p /etc/apt/keyrings \
-     && wget -qO- https://repositories.intel.com/gpu/intel-graphics.key \
-        | gpg --dearmor -o /etc/apt/keyrings/intel-graphics.gpg \
-     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-graphics.gpg] \
-        https://repositories.intel.com/gpu/ubuntu noble unified" \
-        > /etc/apt/sources.list.d/intel-graphics.list \
-     && apt-get update \
-     && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
-        libze1 \
         ocl-icd-libopencl1 \
-     && for pkg in intel-level-zero-gpu intel-opencl-icd-legacy1 intel-level-zero-gpu-legacy1; do \
-            if apt-get install -y --no-install-recommends "$pkg"; then \
-                echo "OK: installed $pkg"; \
-            else \
-                echo "WARN: $pkg not in current Intel repo snapshot (skipped)"; \
-            fi; \
-        done \
+        libze1 \
+     && (apt-get install -y --no-install-recommends intel-level-zero-gpu \
+         && echo "OK: intel-level-zero-gpu installed (L0 GPU backend available)" \
+         || echo "WARN: intel-level-zero-gpu not in Debian repo — OpenVINO will use OpenCL only") \
      && echo "--- Installed Intel GPU drivers ---" \
      && (dpkg -l | grep -E 'intel-(opencl|level-zero)|libze' || true) \
      && echo "--- Registered OpenCL ICDs ---" \
      && (ls /etc/OpenCL/vendors/ 2>/dev/null || true) \
-     && apt-get purge -y --auto-remove wget gnupg \
      && rm -rf /var/lib/apt/lists/* \
      && pip install --no-cache-dir "openvino>=2024.0.0"
 
