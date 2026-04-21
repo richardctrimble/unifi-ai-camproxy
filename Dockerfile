@@ -91,7 +91,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
      && (apt-get install -y --no-install-recommends \
             intel-opencl-icd-legacy1 \
             intel-level-zero-gpu-legacy1 \
-         || echo "WARN: legacy (Gen8-11) iGPU packages not available in this repo snapshot") \
+         && echo "OK: Gen8-11 (legacy) iGPU packages installed" \
+         || echo "WARN: Intel repo has no legacy (Gen8-11) packages in this snapshot") \
+     && dpkg -l | grep -E 'intel-(opencl|level-zero)' || true \
+     && ls /etc/OpenCL/vendors/ 2>/dev/null || true \
      && apt-get purge -y --auto-remove wget gnupg \
      && rm -rf /var/lib/apt/lists/* \
      && pip install --no-cache-dir "openvino>=2024.0.0"
