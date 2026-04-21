@@ -58,7 +58,15 @@ class UniFiProtectClient:
         # for a machine sat on the same LAN.
         connector = aiohttp.TCPConnector(ssl=False)
         self._session = aiohttp.ClientSession(connector=connector)
-        await self._login()
+        try:
+            await self._login()
+        except BaseException:
+            # If login fails, __aexit__ never runs, so we'd leak the session
+            # and aiohttp would print a noisy "Unclosed client session" at
+            # garbage-collect time. Close it ourselves before re-raising.
+            await self._session.close()
+            self._session = None
+            raise
         return self
 
     async def __aexit__(self, *exc):
