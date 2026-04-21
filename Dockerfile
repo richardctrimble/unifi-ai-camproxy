@@ -80,7 +80,18 @@ RUN pip install --no-cache-dir \
 # is best-effort since it's not in every Debian snapshot; OpenVINO
 # falls back to OpenCL when L0 isn't available, which is fine for
 # Gen9–Gen11 anyway.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# intel-opencl-icd in Debian bookworm lives in the `non-free-firmware`
+# component because it ships binary firmware blobs. The python:3.11-slim
+# base image only enables `main` by default, so we add a supplementary
+# sources.list entry that turns on contrib + non-free + non-free-firmware
+# across the three standard archives (main, security, updates).
+RUN echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list.d/nonfree.list \
+     && echo "deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list.d/nonfree.list \
+     && echo "deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware" \
+        >> /etc/apt/sources.list.d/nonfree.list \
+     && apt-get update && apt-get install -y --no-install-recommends \
         intel-opencl-icd \
         ocl-icd-libopencl1 \
         libze1 \
