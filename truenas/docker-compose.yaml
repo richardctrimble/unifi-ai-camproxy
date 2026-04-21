@@ -18,6 +18,16 @@
 # integrated graphics). For NVIDIA GPU acceleration use the :cuda
 # image tag instead and uncomment the NVIDIA block below.
 
+# x-portals tells TrueNAS Scale to show a "Web UI" button on the app
+# card that opens the embedded config/line-drawing UI. The host/port
+# here must match WEB_TOOL_PORT below.
+x-portals:
+  - name: Web UI
+    scheme: http
+    host: 0.0.0.0
+    port: 8091
+    path: /
+
 services:
   unifi-ai-camproxy:
     # Default: CPU + Intel OpenVINO image (~1.5GB).
