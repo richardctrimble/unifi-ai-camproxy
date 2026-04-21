@@ -709,16 +709,31 @@ frame.addEventListener('load', () => {
   hideFrameMsg();
 });
 frame.addEventListener('error', () => {
-  showFrameMsg('Waiting for first frame… click "Refresh frame" or enable Auto-refresh.');
-  // Auto-retry after 3 s if auto-refresh is not already handling it
+  // Re-fetch via XHR so we can surface the server's actual error text
+  // instead of a generic "Waiting for first frame…" when the real issue
+  // is e.g. "camera has no rtsp_url" or "RTSP unreachable".
+  if (camSel.value) fetchFrameWithDiagnostic(camSel.value);
   clearTimeout(frameRetryTimer);
   if (!autoTimer) {
     frameRetryTimer = setTimeout(() => {
       if (camSel.value && !autoTimer)
         frame.src = `/api/frame/${encodeURIComponent(camSel.value)}?t=${Date.now()}`;
-    }, 3000);
+    }, 5000);
   }
 });
+
+async function fetchFrameWithDiagnostic(name) {
+  // When <img> fires error we don't get the HTTP body — do a parallel
+  // fetch() purely to read the diagnostic text the server returned.
+  try {
+    const resp = await fetch(`/api/frame/${encodeURIComponent(name)}?diag=1&t=${Date.now()}`);
+    if (resp.ok) return; // a retry succeeded; the <img> reload will pick it up
+    const text = (await resp.text()) || `HTTP ${resp.status}`;
+    showFrameMsg(text);
+  } catch (_) {
+    showFrameMsg('Waiting for first frame… click "Refresh frame" or enable Auto-refresh.');
+  }
+}
 
 async function loadLineCameras() {
   try {
@@ -855,26 +870,46 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
     return buf.tobytes() if ok else b""
 
 
-def _grab_rtsp_frame(rtsp_url: str, timeout_s: float = 10.0) -> bytes:
+def _grab_rtsp_frame(
+    rtsp_url: str,
+    timeout_s: float = 10.0,
+    transport: str = "tcp",
+) -> bytes:
     """Open the camera RTSP URL directly and grab one frame as JPEG bytes.
 
     Runs in a thread-pool executor (blocking).  Returns empty bytes on failure.
-    Used as a last-resort fallback for the Lines-tab frame endpoint when the
-    Protect stream hasn't started yet.
+    Used as a fallback for the Lines-tab frame endpoint when the Protect
+    stream hasn't started yet (e.g. adoption failed, or the user hasn't
+    approved the camera in Protect) — we still want them to be able to draw
+    lines on a real frame.
+
+    `transport` is "tcp" or "udp"; it's applied via the only knob OpenCV's
+    Python bindings expose for per-capture ffmpeg options — the
+    `OPENCV_FFMPEG_CAPTURE_OPTIONS` env var — so we guard it with a module
+    lock so concurrent callers don't stomp on each other.
     """
-    cap = cv2.VideoCapture()
-    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_s * 1000)
-    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_s * 1000)
-    try:
-        if not cap.open(rtsp_url):
-            return b""
-        ret, frame = cap.read()
-        if ret and frame is not None:
-            return _encode_jpeg(frame)
-    except Exception:
-        pass
-    finally:
-        cap.release()
+    if transport not in _VALID_RTSP_TRANSPORTS:
+        transport = "tcp"
+    with _RTSP_CAPTURE_OPTIONS_LOCK:
+        prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
+        cap = cv2.VideoCapture()
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_s * 1000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_s * 1000)
+        try:
+            if not cap.open(rtsp_url):
+                return b""
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                return _encode_jpeg(frame)
+        except Exception as exc:
+            logger.debug("RTSP one-shot grab failed for %s: %s", rtsp_url, exc)
+        finally:
+            cap.release()
+            if prev is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev
     return b""
 
 
@@ -897,6 +932,14 @@ class LineTool:
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
         self._error_registry = error_registry or {}
         self._start_time = time.monotonic()
+        # Short-lived cache of last-good JPEG per camera so repeated Refresh
+        # clicks (and the Lines-tab auto-refresh poller) don't re-open RTSP
+        # for every request. Entry: name -> (monotonic_ts, jpeg_bytes).
+        self._frame_cache: Dict[str, tuple[float, bytes]] = {}
+        self._frame_cache_ttl_s = 3.0
+        # Coalesce concurrent grabs for the same camera behind a per-camera
+        # lock so a burst of requests only triggers one RTSP open.
+        self._frame_locks: Dict[str, asyncio.Lock] = {}
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/cameras", self._list_cameras)
@@ -955,71 +998,153 @@ class LineTool:
         cams = [{"name": c["name"]} for c in self.config.get("cameras", [])]
         return web.json_response(cams)
 
-    async def _get_frame(self, request: web.Request) -> web.Response:
-        name = request.match_info["name"]
-        cam = self.registry.get(name)
-        if cam is None:
-            return web.Response(status=404, text="camera not registered yet")
+    def _find_camera_config(self, name: str) -> Optional[dict]:
+        """Return the config.yml entry for `name`, or None."""
+        for cam in self.config.get("cameras", []):
+            if cam.get("name") == name:
+                return cam
+        return None
 
-        frame = cam.ai_engine.get_latest_frame()
-        if frame is None:
-            # Fallback 1: last snapshot saved by the AI capture loop.
-            snap_path = await cam.ai_engine.get_snapshot()
-            if snap_path and snap_path.exists():
-                try:
-                    jpeg = snap_path.read_bytes()
-                    if jpeg:
-                        return web.Response(
-                            body=jpeg,
-                            content_type="image/jpeg",
-                            headers={"Cache-Control": "no-store"},
-                        )
-                except OSError:
-                    pass
-
-            # Fallback 2: camera's HTTP snapshot URL (works before Protect connects).
-            if getattr(cam, "snapshot_url", None):
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
-                            cam.snapshot_url,
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        ) as resp:
-                            if resp.status == 200:
-                                jpeg = await resp.read()
-                                if jpeg:
-                                    return web.Response(
-                                        body=jpeg,
-                                        content_type="image/jpeg",
-                                        headers={"Cache-Control": "no-store"},
-                                    )
-                except Exception:
-                    pass
-
-            # Fallback 3: one-shot direct RTSP grab (works before Protect connects,
-            # but requires the camera to be reachable on its RTSP URL).
-            rtsp_url = getattr(cam, "rtsp_url", None)
-            if rtsp_url:
-                loop = asyncio.get_running_loop()
-                jpeg = await loop.run_in_executor(None, _grab_rtsp_frame, rtsp_url)
-                if jpeg:
-                    return web.Response(
-                        body=jpeg,
-                        content_type="image/jpeg",
-                        headers={"Cache-Control": "no-store"},
-                    )
-
-            return web.Response(status=503, text="no frame yet — stream still warming up")
-
-        jpeg = _encode_jpeg(frame)
-        if not jpeg:
-            return web.Response(status=500, text="jpeg encode failed")
-
+    def _jpeg_response(self, jpeg: bytes) -> web.Response:
         return web.Response(
             body=jpeg,
             content_type="image/jpeg",
             headers={"Cache-Control": "no-store"},
         )
+
+    async def _get_frame(self, request: web.Request) -> web.Response:
+        """Serve a JPEG for the Lines tab.
+
+        Resolution order — we try each source in turn and stop at the first
+        one that gives us bytes:
+
+          1. Live frame from AIEngine (if the camera is registered AND its
+             capture loop has produced at least one frame — the cheapest
+             path, no network IO).
+          2. Last snapshot written to disk by the AI capture loop.
+          3. The camera's HTTP snapshot_url (the camera's own MJPEG/JPEG
+             endpoint — works without Protect being involved at all).
+          4. A one-shot direct RTSP grab against the configured rtsp_url
+             with the camera's configured rtsp_transport — works even if
+             Protect adoption is broken, because we're just reading the
+             camera's RTSP stream directly.
+
+        Result is cached for a few seconds so that Refresh spam / the
+        auto-refresh poller don't re-open RTSP on every tick.
+        """
+        name = request.match_info["name"]
+
+        cached = self._frame_cache.get(name)
+        if cached and (time.monotonic() - cached[0]) < self._frame_cache_ttl_s:
+            return self._jpeg_response(cached[1])
+
+        lock = self._frame_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Re-check the cache — another request may have filled it while
+            # we were waiting for the lock.
+            cached = self._frame_cache.get(name)
+            if cached and (time.monotonic() - cached[0]) < self._frame_cache_ttl_s:
+                return self._jpeg_response(cached[1])
+
+            jpeg = await self._fetch_frame(name)
+            if jpeg:
+                self._frame_cache[name] = (time.monotonic(), jpeg)
+                return self._jpeg_response(jpeg)
+
+        # Nothing worked — tell the user *why* so they can act, rather than
+        # the generic "warming up" message which is only true sometimes.
+        cam_cfg = self._find_camera_config(name)
+        if cam_cfg is None:
+            return web.Response(status=404, text=f"no camera named '{name}' in config.yml")
+        if not cam_cfg.get("rtsp_url") and not cam_cfg.get("snapshot_url"):
+            return web.Response(
+                status=503,
+                text="camera has no rtsp_url or snapshot_url — add one in Setup",
+            )
+        return web.Response(
+            status=503,
+            text=(
+                "could not grab a frame from this camera — check that the RTSP URL "
+                "is reachable from the container, the credentials are correct, and "
+                "the camera is online. Try the 'Test' button on the Setup tab."
+            ),
+        )
+
+    async def _fetch_frame(self, name: str) -> bytes:
+        """Try each frame source in order, return raw JPEG bytes or b''."""
+        cam = self.registry.get(name)
+        cam_cfg = self._find_camera_config(name) or {}
+
+        # Source 1: live in-memory frame from the AI engine (best quality,
+        # zero IO), but only if the camera is registered AND its capture
+        # loop has produced at least one frame.
+        if cam is not None:
+            frame = cam.ai_engine.get_latest_frame()
+            if frame is not None:
+                jpeg = _encode_jpeg(frame)
+                if jpeg:
+                    return jpeg
+
+            # Source 2: last snapshot the AI loop wrote to disk.
+            try:
+                snap_path = await cam.ai_engine.get_snapshot()
+            except Exception as exc:
+                logger.debug("get_snapshot() failed for %s: %s", name, exc)
+                snap_path = None
+            if snap_path and snap_path.exists():
+                try:
+                    data = snap_path.read_bytes()
+                    if data:
+                        return data
+                except OSError as exc:
+                    logger.debug("reading snapshot %s failed: %s", snap_path, exc)
+
+        # Source 3: camera's HTTP snapshot URL. Works even before Protect
+        # adoption because we're talking to the camera directly.
+        snapshot_url = (
+            getattr(cam, "snapshot_url", None) if cam is not None else None
+        ) or cam_cfg.get("snapshot_url")
+        if snapshot_url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        snapshot_url,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            if data:
+                                return data
+                        else:
+                            logger.debug(
+                                "snapshot_url for %s returned HTTP %s",
+                                name, resp.status,
+                            )
+            except Exception as exc:
+                logger.debug("snapshot_url GET failed for %s: %s", name, exc)
+
+        # Source 4: one-shot direct RTSP grab. This is the fallback that
+        # "always works as long as the camera is reachable" — including
+        # when Protect adoption is broken entirely.
+        rtsp_url = (
+            getattr(cam, "rtsp_url", None) if cam is not None else None
+        ) or cam_cfg.get("rtsp_url")
+        if rtsp_url:
+            transport = cam_cfg.get("rtsp_transport", "tcp")
+            if transport not in _VALID_RTSP_TRANSPORTS:
+                transport = "tcp"
+            loop = asyncio.get_running_loop()
+            try:
+                jpeg = await loop.run_in_executor(
+                    None, _grab_rtsp_frame, rtsp_url, 10.0, transport,
+                )
+            except Exception as exc:
+                logger.debug("RTSP grab executor raised for %s: %s", name, exc)
+                jpeg = b""
+            if jpeg:
+                return jpeg
+
+        return b""
 
     async def _get_config(self, request: web.Request) -> web.Response:
         """Return camera config without sensitive fields."""
