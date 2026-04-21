@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 import cv2
 import numpy as np
 import yaml
+import aiohttp
 from aiohttp import web
 
 from ai_engine import list_supported_devices, probe_available_devices
@@ -854,6 +855,27 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+def _grab_rtsp_frame(rtsp_url: str, timeout_s: float = 10.0) -> bytes:
+    """Open the camera RTSP URL directly and grab one frame as JPEG bytes.
+
+    Runs in a thread-pool executor (blocking).  Returns empty bytes on failure.
+    Used as a last-resort fallback for the Lines-tab frame endpoint when the
+    Protect stream hasn't started yet.
+    """
+    cap = cv2.VideoCapture(rtsp_url)
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_s * 1000)
+    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_s * 1000)
+    try:
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            return _encode_jpeg(frame)
+    except Exception:
+        pass
+    finally:
+        cap.release()
+    return b""
+
+
 class LineTool:
     """
     Lightweight aiohttp app serving the config + line-drawing UI.
@@ -939,19 +961,52 @@ class LineTool:
 
         frame = cam.ai_engine.get_latest_frame()
         if frame is None:
-            # Fall back to the last saved snapshot file while the live
-            # stream is still warming up.
+            # Fallback 1: last snapshot saved by the AI capture loop.
             snap_path = await cam.ai_engine.get_snapshot()
             if snap_path and snap_path.exists():
                 try:
                     jpeg = snap_path.read_bytes()
+                    if jpeg:
+                        return web.Response(
+                            body=jpeg,
+                            content_type="image/jpeg",
+                            headers={"Cache-Control": "no-store"},
+                        )
+                except OSError:
+                    pass
+
+            # Fallback 2: camera's HTTP snapshot URL (works before Protect connects).
+            if getattr(cam, "snapshot_url", None):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            cam.snapshot_url,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as resp:
+                            if resp.status == 200:
+                                jpeg = await resp.read()
+                                if jpeg:
+                                    return web.Response(
+                                        body=jpeg,
+                                        content_type="image/jpeg",
+                                        headers={"Cache-Control": "no-store"},
+                                    )
+                except Exception:
+                    pass
+
+            # Fallback 3: one-shot direct RTSP grab (works before Protect connects,
+            # but requires the camera to be reachable on its RTSP URL).
+            rtsp_url = getattr(cam, "rtsp_url", None)
+            if rtsp_url:
+                loop = asyncio.get_running_loop()
+                jpeg = await loop.run_in_executor(None, _grab_rtsp_frame, rtsp_url)
+                if jpeg:
                     return web.Response(
                         body=jpeg,
                         content_type="image/jpeg",
                         headers={"Cache-Control": "no-store"},
                     )
-                except OSError:
-                    pass
+
             return web.Response(status=503, text="no frame yet — stream still warming up")
 
         jpeg = _encode_jpeg(frame)
