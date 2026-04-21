@@ -3,7 +3,7 @@
 # Two images are built and pushed on every push to `main` and on version tags:
 #
 #   ghcr.io/richardctrimble/unifi-ai-camproxy:latest   (CPU + Intel OpenVINO)
-#   ghcr.io/richardctrimble/unifi-ai-camproxy:cuda     (NVIDIA CUDA variant)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:cuda     (NVIDIA CUDA variant, optional)
 #
 # Versioning follows a calver scheme: YYYY.M.R where M is the month
 # (no leading zero) and R is the release number within that month
@@ -18,6 +18,16 @@
 # in the same GHCR package without clobbering each other:
 #   :latest, :2026.4.1        → CPU/Intel image
 #   :cuda,  :2026.4.1-cuda    → NVIDIA CUDA image
+#
+# ── CUDA build is OPTIONAL ────────────────────────────────────────────────────
+# The CUDA image is large and slow to build. It is skipped by default on
+# automated runs. To enable it, use either method:
+#
+#   1. Manual trigger (workflow_dispatch): check the "Build CUDA image" box.
+#
+#   2. Repository variable: set  BUILD_CUDA = true  in
+#      Settings → Secrets and variables → Actions → Variables.
+#      This enables the CUDA build on every push to main / version tag.
 
 name: Docker
 
@@ -30,6 +40,13 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      build_cuda:
+        description: "Build the CUDA container image"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -79,9 +96,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── NVIDIA CUDA image ──────────────────────────────────────────────────────
+  # Skipped by default. Enable via the workflow_dispatch "build_cuda" input
+  # or by setting the repository variable BUILD_CUDA=true.
   build-cuda:
     name: Build & push (CUDA)
     runs-on: ubuntu-latest
+    if: inputs.build_cuda == true || vars.BUILD_CUDA == 'true'
 
     steps:
       - name: Checkout

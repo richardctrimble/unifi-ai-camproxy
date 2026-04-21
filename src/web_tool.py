@@ -154,6 +154,12 @@ INDEX_HTML = r"""<!doctype html>
     .draft     { stroke: #4af; stroke-width: 3; fill: none; }
     .handle    { fill: #4af; stroke: #fff; stroke-width: 1; }
     .empty-msg { color: #666; font-style: italic; padding: 20px; }
+    .frame-msg {
+      position: absolute; inset: 0; display: none; align-items: center;
+      justify-content: center; color: #888; font-size: 13px; text-align: center;
+      padding: 16px; background: rgba(0,0,0,0.55); pointer-events: none;
+      border-radius: 4px;
+    }
 
     /* Status tab */
     .status-grid {
@@ -258,6 +264,7 @@ INDEX_HTML = r"""<!doctype html>
     <div class="stage" id="stage">
       <img id="frame" alt="camera frame">
       <svg id="svg" viewBox="0 0 1 1" preserveAspectRatio="none"></svg>
+      <div id="frame-msg" class="frame-msg"></div>
     </div>
 
     <h3>Line properties</h3>
@@ -679,6 +686,7 @@ async function loadConfig() {
 const camSel = document.getElementById('cam');
 const frame = document.getElementById('frame');
 const svg = document.getElementById('svg');
+const frameMsg = document.getElementById('frame-msg');
 const lineList = document.getElementById('line-list');
 const lineNameInp = document.getElementById('line-name');
 const dirSel = document.getElementById('dir');
@@ -686,6 +694,30 @@ const dirSel = document.getElementById('dir');
 let pts = [];
 let existingLines = [];
 let autoTimer = null;
+let frameRetryTimer = null;
+
+function showFrameMsg(text) {
+  frameMsg.textContent = text;
+  frameMsg.style.display = 'flex';
+}
+function hideFrameMsg() {
+  frameMsg.style.display = 'none';
+}
+
+frame.addEventListener('load', () => {
+  hideFrameMsg();
+});
+frame.addEventListener('error', () => {
+  showFrameMsg('Waiting for first frame… click "Refresh frame" or enable Auto-refresh.');
+  // Auto-retry after 3 s if auto-refresh is not already handling it
+  clearTimeout(frameRetryTimer);
+  if (!autoTimer) {
+    frameRetryTimer = setTimeout(() => {
+      if (camSel.value && !autoTimer)
+        frame.src = `/api/frame/${encodeURIComponent(camSel.value)}?t=${Date.now()}`;
+    }, 3000);
+  }
+});
 
 async function loadLineCameras() {
   try {
@@ -694,6 +726,7 @@ async function loadLineCameras() {
     if (cams.length) await loadLineCamera();
     else {
       frame.src = '';
+      hideFrameMsg();
       lineList.innerHTML = '<div class="empty-msg">No cameras configured yet.</div>';
     }
   } catch (_) {}
@@ -702,6 +735,7 @@ async function loadLineCameras() {
 async function loadLineCamera() {
   const name = camSel.value;
   if (!name) return;
+  showFrameMsg('Loading frame\u2026');
   frame.src = `/api/frame/${encodeURIComponent(name)}?t=${Date.now()}`;
   try {
     existingLines = await (await fetch(`/api/lines/${encodeURIComponent(name)}`)).json();
@@ -712,8 +746,10 @@ async function loadLineCamera() {
 }
 
 function refreshFrame() {
-  if (camSel.value)
+  if (camSel.value) {
+    showFrameMsg('Loading frame\u2026');
     frame.src = `/api/frame/${encodeURIComponent(camSel.value)}?t=${Date.now()}`;
+  }
 }
 
 function redraw() {
@@ -903,6 +939,19 @@ class LineTool:
 
         frame = cam.ai_engine.get_latest_frame()
         if frame is None:
+            # Fall back to the last saved snapshot file while the live
+            # stream is still warming up.
+            snap_path = await cam.ai_engine.get_snapshot()
+            if snap_path and snap_path.exists():
+                try:
+                    jpeg = snap_path.read_bytes()
+                    return web.Response(
+                        body=jpeg,
+                        content_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"},
+                    )
+                except OSError:
+                    pass
             return web.Response(status=503, text="no frame yet — stream still warming up")
 
         jpeg = _encode_jpeg(frame)
