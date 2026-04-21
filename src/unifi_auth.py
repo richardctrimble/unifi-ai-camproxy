@@ -31,7 +31,16 @@ logger = logging.getLogger("unifi_auth")
 
 
 class UniFiAuthError(Exception):
-    """Raised when we can't talk to the UniFi controller."""
+    """Raised when we can't talk to the UniFi controller.
+
+    ``status`` is the HTTP status code from the failing request when one
+    is available (e.g. 401/403 for bad creds, 429 for rate-limit lockout).
+    It is None for transport-level failures.
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 class UniFiProtectClient:
@@ -100,7 +109,8 @@ class UniFiProtectClient:
                 if r.status != 200:
                     body = (await r.text())[:200]
                     raise UniFiAuthError(
-                        f"Login to {self.host} failed ({r.status}): {body}"
+                        f"Login to {self.host} failed ({r.status}): {body}",
+                        status=r.status,
                     )
                 # UDM / UNVR hands us the CSRF token in a response header.
                 self._csrf = (

@@ -298,6 +298,34 @@ def _validate_camera_cfg(cam_cfg: dict) -> str | None:
     return None
 
 
+# Cooldown state for credential-level failures (bad password → 401/403,
+# or too many login attempts → 429). When Protect rejects us we MUST NOT
+# keep hammering /api/auth/login every few seconds — that just trips the
+# attempt limit and keeps us locked out forever. Instead we freeze refreshes
+# for a few minutes and surface a loud error so the user knows to fix creds.
+_auth_lockout_until: float = 0.0
+_auth_lockout_reason: str = ""
+
+# How long to back off after each kind of auth failure. 429s are Protect
+# explicitly telling us "wait"; 401/403 just means the creds are wrong
+# and no amount of retrying will help until the user intervenes.
+_AUTH_LOCKOUT_RATE_LIMIT = 15 * 60   # 15 min after a 429
+_AUTH_LOCKOUT_BAD_CREDS  = 10 * 60   # 10 min after a 401/403
+
+
+def _set_auth_lockout(seconds: float, reason: str) -> None:
+    """Arm the auth cooldown and record a short reason for the web UI."""
+    global _auth_lockout_until, _auth_lockout_reason
+    _auth_lockout_until = asyncio.get_event_loop().time() + seconds
+    _auth_lockout_reason = reason
+
+
+def _auth_lockout_remaining() -> float:
+    """Seconds left on the cooldown (0 if not in cooldown)."""
+    remaining = _auth_lockout_until - asyncio.get_event_loop().time()
+    return max(0.0, remaining)
+
+
 async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
     """Force-fetch a fresh adoption token from Protect, bypassing any token
     saved in config.yml.
@@ -312,7 +340,19 @@ async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
     a manual token in config.yml) — in that case the caller keeps the
     existing token and the camera will loop until the user adds an API
     key or username/password in the UniFi tab.
+
+    Also returns None (without touching Protect) while an auth lockout
+    is active — avoids compounding 401/403/429 failures into a hard
+    rate-limit ban.
     """
+    remaining = _auth_lockout_remaining()
+    if remaining > 0:
+        logger.debug(
+            "Skipping token refresh — auth lockout active (%.0fs left, %s)",
+            remaining, _auth_lockout_reason,
+        )
+        return None
+
     unifi_cfg = global_cfg.get("unifi", {}) or {}
     host = unifi_cfg.get("host")
     api_key = unifi_cfg.get("api_key")
@@ -328,7 +368,32 @@ async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
         ) as client:
             return await client.fetch_adoption_token()
     except UniFiAuthError as exc:
-        logger.warning("Token refresh failed: %s", exc)
+        status = getattr(exc, "status", None)
+        if status == 429:
+            _set_auth_lockout(
+                _AUTH_LOCKOUT_RATE_LIMIT,
+                "Protect rate-limited our login (429)",
+            )
+            logger.error(
+                "UniFi login rate-limited (429). Pausing refresh for %d min. "
+                "Your password may still be wrong — once the lockout clears, "
+                "fix creds in the UniFi tab before restarting.",
+                _AUTH_LOCKOUT_RATE_LIMIT // 60,
+            )
+        elif status in (401, 403):
+            _set_auth_lockout(
+                _AUTH_LOCKOUT_BAD_CREDS,
+                f"UniFi rejected creds ({status})",
+            )
+            logger.error(
+                "═══ UNIFI CREDENTIALS REJECTED (HTTP %s) ═══ "
+                "Open the web UI → UniFi tab, click 'Test login' to verify "
+                "your username / password, then Save. Token refresh paused "
+                "for %d min to avoid a rate-limit lockout.",
+                status, _AUTH_LOCKOUT_BAD_CREDS // 60,
+            )
+        else:
+            logger.warning("Token refresh failed: %s", exc)
         return None
 
 
