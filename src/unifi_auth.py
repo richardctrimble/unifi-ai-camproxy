@@ -44,10 +44,17 @@ class UniFiProtectClient:
     rather than fatal.
     """
 
-    def __init__(self, host: str, username: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        username: str = "",
+        password: str = "",
+        api_key: str = "",
+    ):
         self.host = host if host.startswith("http") else f"https://{host}"
         self.username = username
         self.password = password
+        self.api_key = api_key
         self._session: Optional[aiohttp.ClientSession] = None
         self._csrf: Optional[str] = None
 
@@ -59,7 +66,11 @@ class UniFiProtectClient:
         connector = aiohttp.TCPConnector(ssl=False)
         self._session = aiohttp.ClientSession(connector=connector)
         try:
-            await self._login()
+            # API key auth skips login entirely — the key goes on every
+            # request via X-API-KEY. We still need a session for the
+            # aiohttp calls, but there's no login flow to run.
+            if not self.api_key:
+                await self._login()
         except BaseException:
             # If login fails, __aexit__ never runs, so we'd leak the session
             # and aiohttp would print a noisy "Unclosed client session" at
@@ -99,6 +110,8 @@ class UniFiProtectClient:
 
     def _headers(self, extra: Optional[dict] = None) -> dict:
         h = {"Accept": "application/json"}
+        if self.api_key:
+            h["X-API-KEY"] = self.api_key
         if self._csrf:
             h["X-CSRF-Token"] = self._csrf
         if extra:
@@ -112,32 +125,69 @@ class UniFiProtectClient:
         Try several known endpoints to retrieve a fresh adoption token.
 
         Strategy, in order:
-          1. GET /proxy/protect/api/bootstrap — token fields live inside
-          2. GET /proxy/protect/api/cameras/qr — returns JSON on newer builds
-          3. Same endpoint but decoded as a QR PNG via OpenCV
+          1. GET /proxy/protect/api/cameras/manage-payload — keshavdv upstream
+             path; reads ``mgmt.token``. Most likely to still work on older
+             Protect builds and the canonical field name for adoption.
+          2. GET /proxy/protect/api/bootstrap — older field-name variants
+             (authToken, adoptionToken, accessKey) inside the top-level or
+             nested ``nvr`` object.
+          3. GET /proxy/protect/api/cameras/qr — returns JSON on some builds.
+          4. Same endpoint but decoded as a QR PNG via OpenCV.
+
+        On failure we log the status / content-type / top-level JSON keys
+        from every attempt so the user (or a future maintainer) can see
+        what their Protect build actually returned — the docs only cover
+        what *used* to exist, not what ships today.
 
         Raises UniFiAuthError if every path fails.
         """
-        # ── 1. bootstrap JSON ──────────────────────────────────────────────
+        attempts: list[str] = []
+
+        # ── 1. manage-payload (upstream path) ──────────────────────────────
+        mp_url = f"{self.host}/proxy/protect/api/cameras/manage-payload"
+        try:
+            async with self._session.get(mp_url, headers=self._headers()) as r:
+                attempts.append(f"manage-payload → HTTP {r.status}")
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    # keshavdv docs: response["mgmt"]["token"]
+                    mgmt = (data or {}).get("mgmt") if isinstance(data, dict) else None
+                    token = (mgmt or {}).get("token") if isinstance(mgmt, dict) else None
+                    if isinstance(token, str) and len(token) > 8:
+                        logger.info("Fetched adoption token from /cameras/manage-payload")
+                        return token
+                    # Some builds put the token at the top level instead.
+                    token = self._extract_token(data)
+                    if token:
+                        logger.info("Fetched adoption token from /cameras/manage-payload (top-level)")
+                        return token
+                    if isinstance(data, dict):
+                        attempts[-1] += f" keys={sorted(data.keys())[:10]}"
+        except Exception as e:
+            attempts.append(f"manage-payload → error: {e}")
+
+        # ── 2. bootstrap JSON ──────────────────────────────────────────────
         bootstrap_url = f"{self.host}/proxy/protect/api/bootstrap"
         try:
             async with self._session.get(bootstrap_url, headers=self._headers()) as r:
+                attempts.append(f"bootstrap → HTTP {r.status}")
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     token = self._extract_token(data)
                     if token:
                         logger.info("Fetched adoption token from /bootstrap")
                         return token
-                else:
-                    logger.debug("bootstrap returned %s", r.status)
+                    if isinstance(data, dict):
+                        attempts[-1] += f" keys={sorted(data.keys())[:10]}"
         except Exception as e:
-            logger.debug("bootstrap endpoint failed: %s", e)
+            attempts.append(f"bootstrap → error: {e}")
 
-        # ── 2. /cameras/qr as JSON ─────────────────────────────────────────
+        # ── 3/4. /cameras/qr as JSON or PNG ────────────────────────────────
         qr_url = f"{self.host}/proxy/protect/api/cameras/qr"
         try:
             async with self._session.get(qr_url, headers=self._headers()) as r:
                 ctype = r.headers.get("Content-Type", "")
+                attempts.append(f"cameras/qr → HTTP {r.status} ({ctype})")
                 if r.status == 200 and "json" in ctype:
                     data = await r.json(content_type=None)
                     token = self._extract_token(data)
@@ -145,21 +195,24 @@ class UniFiProtectClient:
                         logger.info("Fetched adoption token from /cameras/qr JSON")
                         return token
                 elif r.status == 200 and ("image" in ctype or "octet" in ctype):
-                    # ── 3. Fall through: decode the QR locally ─────────────
                     png_bytes = await r.read()
                     token = self._decode_qr(png_bytes)
                     if token:
                         logger.info("Decoded adoption token from QR image")
                         return token
-                else:
-                    logger.debug("cameras/qr returned %s (%s)", r.status, ctype)
         except Exception as e:
-            logger.debug("cameras/qr endpoint failed: %s", e)
+            attempts.append(f"cameras/qr → error: {e}")
 
+        logger.warning(
+            "Adoption-token auto-fetch failed. Endpoint attempts: %s",
+            "; ".join(attempts) or "(none tried)",
+        )
         raise UniFiAuthError(
             "Could not fetch an adoption token automatically. Your Protect "
-            "version may expose a different endpoint — fall back to pasting "
-            "the token manually in config.yml (token: \"...\")."
+            "version may not expose any of the known endpoints. Open "
+            f"{self.host}/proxy/protect/api/cameras/manage-payload in a browser "
+            "(while logged in) and paste the mgmt.token value into the UniFi "
+            "tab's 'Adoption token' field."
         )
 
     @staticmethod

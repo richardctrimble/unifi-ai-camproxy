@@ -158,18 +158,25 @@ async def ensure_adoption_token(cfg: dict) -> str | None:
     username = unifi_cfg.get("username")
     password = unifi_cfg.get("password")
     host = unifi_cfg.get("host")
+    api_key = unifi_cfg.get("api_key")
 
-    if not (username and password and host):
+    if not host:
+        logger.error("No adoption token and no unifi.host in config.yml.")
+        return None
+    if not api_key and not (username and password):
         logger.error(
             "No adoption token and no credentials in config.yml. "
-            "Either set unifi.token manually or provide "
-            "unifi.username + unifi.password to auto-fetch."
+            "Either set unifi.token manually, provide unifi.api_key, "
+            "or provide unifi.username + unifi.password to auto-fetch."
         )
         return None
 
-    logger.info("Fetching adoption token from %s as %s", host, username)
+    auth_label = "API key" if api_key else f"user {username}"
+    logger.info("Fetching adoption token from %s (%s)", host, auth_label)
     try:
-        async with UniFiProtectClient(host, username, password) as client:
+        async with UniFiProtectClient(
+            host, username or "", password or "", api_key=api_key or "",
+        ) as client:
             return await client.fetch_adoption_token()
     except UniFiAuthError as e:
         logger.error("Auto-adoption failed: %s", e)
@@ -234,8 +241,9 @@ async def auto_adopt_pending(cfg: dict, camera_specs: list) -> None:
     username = unifi_cfg.get("username")
     password = unifi_cfg.get("password")
     host = unifi_cfg.get("host")
+    api_key = unifi_cfg.get("api_key")
 
-    if not (username and password and host):
+    if not host or not (api_key or (username and password)):
         logger.info("No credentials provided — skipping auto-adopt step")
         return
 
@@ -243,7 +251,9 @@ async def auto_adopt_pending(cfg: dict, camera_specs: list) -> None:
     await asyncio.sleep(15)
 
     try:
-        async with UniFiProtectClient(host, username, password) as client:
+        async with UniFiProtectClient(
+            host, username or "", password or "", api_key=api_key or "",
+        ) as client:
             for spec in camera_specs:
                 ok = await client.approve_pending(spec["mac"], spec["name"])
                 if not ok:
