@@ -6,7 +6,7 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import yaml
 
@@ -298,18 +298,56 @@ def _validate_camera_cfg(cam_cfg: dict) -> str | None:
     return None
 
 
+async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
+    """Force-fetch a fresh adoption token from Protect, bypassing any token
+    saved in config.yml.
+
+    Protect 7.x consumes the adoption token on first adoption — every
+    reconnect after that is rejected unless we present a fresh token.
+    Upstream unifi-cam-proxy doesn't rotate the token (it builds the WS
+    URI once at Core.__init__ and reuses it forever), so we refresh
+    here before each retry in run_camera().
+
+    Returns None when we don't have credentials to fetch a new one (only
+    a manual token in config.yml) — in that case the caller keeps the
+    existing token and the camera will loop until the user adds an API
+    key or username/password in the UniFi tab.
+    """
+    unifi_cfg = global_cfg.get("unifi", {}) or {}
+    host = unifi_cfg.get("host")
+    api_key = unifi_cfg.get("api_key")
+    username = unifi_cfg.get("username")
+    password = unifi_cfg.get("password")
+
+    if not host or not (api_key or (username and password)):
+        return None
+
+    try:
+        async with UniFiProtectClient(
+            host, username or "", password or "", api_key=api_key or "",
+        ) as client:
+            return await client.fetch_adoption_token()
+    except UniFiAuthError as exc:
+        logger.warning("Token refresh failed: %s", exc)
+        return None
+
+
 async def run_camera(cam_cfg: dict, global_cfg: dict, token: str):
     """Spawn one camera worker — each becomes a spoofed UniFi camera in Protect.
 
     This function will retry indefinitely on failure with exponential backoff,
     so a single bad camera never crashes the entire container.
+
+    Between retries we refresh the adoption token from Protect (Protect 7.x
+    one-shot tokens) — see _refresh_adoption_token for rationale.
     """
     cam_name = cam_cfg.get("name", "<unnamed>")
     retry_delay = 5
+    current_token = token
 
     while True:
         try:
-            await _run_camera_once(cam_cfg, global_cfg, token)
+            await _run_camera_once(cam_cfg, global_cfg, current_token)
             # If _run_camera_once returns cleanly, the camera session ended
             # normally (e.g. shutdown signal) — don't retry.
             break
@@ -324,6 +362,11 @@ async def run_camera(cam_cfg: dict, global_cfg: dict, token: str):
             )
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, _MAX_CAMERA_RETRY_DELAY)
+
+            fresh = await _refresh_adoption_token(global_cfg)
+            if fresh and fresh != current_token:
+                logger.info("Rotated adoption token for %s", cam_name)
+                current_token = fresh
 
 
 async def _run_camera_once(cam_cfg: dict, global_cfg: dict, token: str):
