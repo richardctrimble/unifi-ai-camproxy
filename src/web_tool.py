@@ -195,8 +195,10 @@ INDEX_HTML = r"""<!doctype html>
 
   <div class="tabs">
     <button class="tab active" data-pane="status">Status</button>
+    <button class="tab" data-pane="unifi">UniFi</button>
     <button class="tab" data-pane="setup">Setup</button>
     <button class="tab" data-pane="lines">Lines</button>
+    <button class="tab" data-pane="logs">Logs</button>
   </div>
 
   <!-- ═══ STATUS TAB ═══ -->
@@ -230,6 +232,36 @@ INDEX_HTML = r"""<!doctype html>
     <div class="card">
       <div class="card-header"><h3>Cameras</h3></div>
       <div id="s-cameras"><span class="empty-msg">Loading…</span></div>
+    </div>
+  </div>
+
+  <!-- ═══ UNIFI TAB ═══ -->
+  <div id="unifi" class="pane">
+    <div id="unifi-banner" class="banner">
+      UniFi credentials saved to config.yml.
+    </div>
+    <div class="card">
+      <div class="card-header"><h3>UniFi Protect connection</h3></div>
+      <div class="hint" style="margin-bottom:10px;">
+        Credentials for your UDM / UDM Pro / UNVR. Use <em>either</em> a local
+        Protect user (username + password) <em>or</em> a pre-generated adoption
+        token — not both. Changes are written to <code>config.yml</code>.
+      </div>
+      <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;max-width:640px;">
+        <label>Host / IP</label>
+        <input id="u-host" placeholder="192.168.1.1">
+        <label>Username</label>
+        <input id="u-user" placeholder="local Protect username" autocomplete="username">
+        <label>Password</label>
+        <input id="u-pass" type="password" placeholder="(unchanged if left blank)" autocomplete="new-password">
+        <label>Adoption token</label>
+        <input id="u-token" placeholder="optional — overrides username/password when set">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+        <button id="u-test" class="btn-primary">Test login</button>
+        <button id="u-save" class="btn-primary">Save &amp; retry adoption</button>
+        <span id="u-result" style="align-self:center;font-size:13px;"></span>
+      </div>
     </div>
   </div>
 
@@ -294,6 +326,31 @@ INDEX_HTML = r"""<!doctype html>
     <div id="line-list"></div>
   </div>
 
+  <!-- ═══ LOGS TAB ═══ -->
+  <div id="logs" class="pane">
+    <div class="card">
+      <div class="card-header">
+        <h3>Container logs</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <label style="margin:0;">Lines:
+            <select id="log-lines" style="margin-left:4px;">
+              <option value="200">200</option>
+              <option value="500" selected>500</option>
+              <option value="1000">1000</option>
+              <option value="5000">5000</option>
+            </select>
+          </label>
+          <label style="margin:0;"><input type="checkbox" id="log-auto"> Auto-refresh (3s)</label>
+          <button id="log-refresh" class="btn-sm">Refresh</button>
+        </div>
+      </div>
+      <div id="log-path" style="font-size:12px;color:#666;margin-bottom:8px;"></div>
+      <pre id="log-output" style="background:#111;border:1px solid #333;border-radius:4px;
+        padding:10px;max-height:65vh;overflow:auto;font-size:12px;line-height:1.4;
+        white-space:pre-wrap;word-break:break-all;margin:0;">Loading…</pre>
+    </div>
+  </div>
+
 <script>
 /* ── Tab switching ─────────────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach(t => {
@@ -304,6 +361,8 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById(t.dataset.pane).classList.add('active');
     if (t.dataset.pane === 'lines') loadLineCameras();
     if (t.dataset.pane === 'status') refreshStatus();
+    if (t.dataset.pane === 'unifi') loadUnifiConfig();
+    if (t.dataset.pane === 'logs') refreshLogs();
   });
 });
 
@@ -866,6 +925,118 @@ window.deleteLine = async function(idx) {
   }
 };
 
+/* ── UniFi tab ─────────────────────────────────────────────────────────── */
+const uHost  = document.getElementById('u-host');
+const uUser  = document.getElementById('u-user');
+const uPass  = document.getElementById('u-pass');
+const uToken = document.getElementById('u-token');
+const uResult = document.getElementById('u-result');
+const uBanner = document.getElementById('unifi-banner');
+
+function setUnifiResult(ok, msg) {
+  uResult.textContent = (ok ? '✓ ' : '✗ ') + msg;
+  uResult.style.color = ok ? '#4c4' : '#f87';
+}
+
+async function loadUnifiConfig() {
+  try {
+    const data = await (await fetch('/api/unifi')).json();
+    uHost.value = data.host || '';
+    uUser.value = data.username || '';
+    uPass.value = '';
+    uPass.placeholder = data.has_password ? '(unchanged — leave blank to keep)' : 'Protect password';
+    uToken.value = '';
+    uToken.placeholder = data.has_token
+      ? '(unchanged — leave blank to keep)'
+      : 'optional — overrides username/password when set';
+  } catch (e) {
+    setUnifiResult(false, 'Could not load current UniFi config');
+  }
+}
+
+document.getElementById('u-test').addEventListener('click', async () => {
+  setUnifiResult(true, 'Testing…');
+  uResult.style.color = '#aaa';
+  try {
+    const resp = await fetch('/api/test-unifi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: uHost.value.trim(),
+        username: uUser.value.trim(),
+        password: uPass.value,
+      }),
+    });
+    const data = await resp.json();
+    setUnifiResult(!!data.ok, data.message || (data.ok ? 'Login succeeded' : 'Login failed'));
+  } catch (e) {
+    setUnifiResult(false, 'Request failed');
+  }
+});
+
+document.getElementById('u-save').addEventListener('click', async () => {
+  setUnifiResult(true, 'Saving…');
+  uResult.style.color = '#aaa';
+  try {
+    const resp = await fetch('/api/unifi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: uHost.value.trim(),
+        username: uUser.value.trim(),
+        password: uPass.value,
+        token: uToken.value.trim(),
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      setUnifiResult(false, data.message || ('HTTP ' + resp.status));
+      return;
+    }
+    setUnifiResult(true, 'Saved to config.yml');
+    uBanner.textContent = data.message || 'Saved. Restart required to re-run adoption.';
+    uBanner.style.display = 'block';
+    await loadUnifiConfig();
+  } catch (e) {
+    setUnifiResult(false, 'Request failed');
+  }
+});
+
+/* ── Logs tab ──────────────────────────────────────────────────────────── */
+const logOutput = document.getElementById('log-output');
+const logLines = document.getElementById('log-lines');
+const logAuto = document.getElementById('log-auto');
+const logPath = document.getElementById('log-path');
+let logTimer = null;
+
+async function refreshLogs() {
+  try {
+    const n = logLines.value || '500';
+    const resp = await fetch('/api/logs?lines=' + encodeURIComponent(n));
+    const data = await resp.json();
+    if (!data.ok) {
+      logOutput.textContent = data.message || 'Could not read logs.';
+      logPath.textContent = '';
+      return;
+    }
+    logPath.textContent = data.path ? ('Source: ' + data.path) : '';
+    // Render newest at bottom and auto-scroll to the tail.
+    logOutput.textContent = (data.lines || []).join('\n');
+    logOutput.scrollTop = logOutput.scrollHeight;
+  } catch (e) {
+    logOutput.textContent = 'Request failed: ' + e;
+  }
+}
+
+document.getElementById('log-refresh').addEventListener('click', refreshLogs);
+logLines.addEventListener('change', refreshLogs);
+logAuto.addEventListener('change', (e) => {
+  clearInterval(logTimer);
+  if (e.target.checked) logTimer = setInterval(() => {
+    if (document.querySelector('[data-pane="logs"].active')) refreshLogs();
+  }, 3000);
+});
+
 /* ── Init ──────────────────────────────────────────────────────────────── */
 (async () => {
   await loadDeviceCatalog();
@@ -968,6 +1139,9 @@ class LineTool:
         self.app.router.add_get("/api/status", self._get_status)
         self.app.router.add_get("/api/devices", self._get_devices)
         self.app.router.add_get("/api/logs", self._get_logs)
+        self.app.router.add_get("/api/unifi", self._get_unifi)
+        self.app.router.add_post("/api/unifi", self._save_unifi)
+        self.app.router.add_post("/api/test-unifi", self._test_unifi)
         self.app.router.add_post("/api/restart", self._restart_container)
 
     # ── helpers ─────────────────────────────────────────────────────────────
@@ -1558,39 +1732,150 @@ class LineTool:
         return re.sub(r"(?i)(rtsp://)([^/\s:@]+):([^@\s]+)@", r"\1***:***@", line)
 
     async def _get_logs(self, request: web.Request) -> web.Response:
-        """Return the last ~200 lines of logs if a log file is in use.
+        """Return the last ~500 lines of logs from the rotating log file.
 
-        This is a best-effort convenience so TrueNAS users without easy
-        SSH access can inspect the tail of the log from the web UI.
-        Falls back to a helpful message when stdout logging is in use
-        (the standard Docker setup) since we can't read our own stdout.
+        main._configure_logging() writes to /config/camproxy.log by default
+        so this endpoint works out of the box. Values like RTSP credentials
+        are redacted before returning to the UI.
+
+        Query params:
+          lines=N   — override tail length (default 500, max 5000)
         """
-        if os.environ.get("WEB_UI_ENABLE_LOGS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            return web.json_response({
-                "ok": False,
-                "message": "Log access is disabled. Set WEB_UI_ENABLE_LOGS=true to enable this endpoint.",
-                "lines": [],
-            })
+        try:
+            n = int(request.query.get("lines", "500"))
+        except ValueError:
+            n = 500
+        n = max(1, min(n, 5000))
 
         log_path = os.environ.get("LOG_FILE") or "/config/camproxy.log"
         try:
             if not Path(log_path).exists():
                 return web.json_response({
                     "ok": False,
-                    "message": ("No log file on disk. Use 'docker logs' or set "
-                                "LOG_FILE=/config/camproxy.log to persist logs."),
+                    "message": (f"No log file at {log_path}. Set LOG_FILE to a "
+                                "writable path or check /config is mounted."),
                     "lines": [],
                 })
-            # Read last 200 lines
+            # Read the tail by seeking backwards — cheap even on large files.
             with open(log_path, "rb") as f:
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
-                f.seek(max(0, size - 32_768))
+                # ~200 bytes/line average × requested tail, capped at 1 MB
+                f.seek(max(0, size - min(1_000_000, 200 * n)))
                 tail = f.read().decode("utf-8", errors="replace")
-            lines = [self._redact_log_line(line) for line in tail.splitlines()[-200:]]
-            return web.json_response({"ok": True, "lines": lines})
+            lines = [self._redact_log_line(line) for line in tail.splitlines()[-n:]]
+            return web.json_response({"ok": True, "lines": lines, "path": log_path})
         except OSError as exc:
             return web.json_response({"ok": False, "message": str(exc), "lines": []})
+
+    async def _get_unifi(self, request: web.Request) -> web.Response:
+        """Return the current UniFi config, with secrets redacted.
+
+        We never send the raw password / token back to the browser — the
+        Status tab would then leak them in anyone's browser DevTools.
+        Instead the UI gets booleans so it can show "unchanged" placeholders.
+        """
+        self._reload_config()
+        unifi = self.config.get("unifi", {}) or {}
+        return web.json_response({
+            "host": unifi.get("host", ""),
+            "username": unifi.get("username", ""),
+            "has_password": bool(unifi.get("password")),
+            "has_token": bool(unifi.get("token")),
+        })
+
+    async def _save_unifi(self, request: web.Request) -> web.Response:
+        """Persist UniFi credentials to config.yml.
+
+        Blank password / token fields are treated as "leave unchanged" so
+        the user doesn't have to retype the password every time they edit
+        the host. Adoption isn't re-run from inside this handler — we tell
+        the user to restart via the banner, which is the only reliable way
+        to rebuild the unifi-cam-proxy camera processes.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid JSON")
+        if not isinstance(body, dict):
+            return web.Response(status=400, text="expected a JSON object")
+
+        host = (body.get("host") or "").strip()
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        token = (body.get("token") or "").strip()
+
+        if not host:
+            return web.json_response({"ok": False, "message": "Host is required"})
+
+        self._reload_config()
+        unifi = self.config.get("unifi", {}) or {}
+        unifi["host"] = host
+        if username:
+            unifi["username"] = username
+        else:
+            unifi.pop("username", None)
+        # Blank = keep existing value; explicit value = overwrite.
+        if password:
+            unifi["password"] = password
+        if token:
+            unifi["token"] = token
+
+        self.config["unifi"] = unifi
+        try:
+            self._write_config()
+        except OSError as exc:
+            return web.json_response(
+                {"ok": False, "message": f"Could not write config.yml: {exc}"},
+                status=500,
+            )
+        logger.info("UniFi credentials updated via web UI (host=%s)", host)
+        return web.json_response({
+            "ok": True,
+            "message": "Saved to config.yml. Restart the container to re-run adoption.",
+        })
+
+    async def _test_unifi(self, request: web.Request) -> web.Response:
+        """Try the supplied credentials against the Protect controller.
+
+        Doesn't touch config.yml — this is purely a "would these work?"
+        check so the user can verify before saving. Blank password means
+        "use the stored one" so the user can re-test without retyping it.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid JSON")
+
+        host = (body.get("host") or "").strip()
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+
+        if not host or not username:
+            return web.json_response(
+                {"ok": False, "message": "Host and username are required"}
+            )
+        if not password:
+            stored = (self.config.get("unifi", {}) or {}).get("password") or ""
+            if not stored:
+                return web.json_response(
+                    {"ok": False, "message": "Password required (no stored value)"}
+                )
+            password = stored
+
+        # Import here to avoid a circular import on module load.
+        from unifi_auth import UniFiProtectClient, UniFiAuthError
+
+        try:
+            async with UniFiProtectClient(host, username, password):
+                pass
+        except UniFiAuthError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "message": f"Unexpected error: {exc}"}
+            )
+        return web.json_response({"ok": True, "message": "Login succeeded"})
 
     async def _restart_container(self, request: web.Request) -> web.Response:
         """Trigger a graceful container restart by exiting the process.

@@ -33,11 +33,12 @@ def _configure_logging() -> None:
 
     Environment variables:
       LOG_LEVEL  — INFO (default), DEBUG, WARNING, ERROR
-      LOG_FILE   — optional path to a rotating log file (e.g.
-                   /config/camproxy.log). When set, logs are written
-                   there in addition to stdout so the web UI's
-                   "View Logs" API can surface them. 5 MB rotation, 3
-                   backups — never more than ~20 MB on disk.
+      LOG_FILE   — path to a rotating log file. Defaults to
+                   /config/camproxy.log so the web UI's Logs tab
+                   always has content to show. Set to an empty
+                   string to disable file logging (stdout only).
+                   5 MB rotation, 3 backups — never more than
+                   ~20 MB on disk.
     """
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -45,7 +46,7 @@ def _configure_logging() -> None:
 
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
-    log_file = os.environ.get("LOG_FILE")
+    log_file = os.environ.get("LOG_FILE", "/config/camproxy.log")
     if log_file:
         try:
             from logging.handlers import RotatingFileHandler
