@@ -47,14 +47,27 @@ def detect_local_ip(target_host: str = "1.1.1.1") -> str:
     """
     Return this machine's primary outbound IPv4 address. `target_host`
     is just used to choose a route — no packet is actually sent.
-    Falls back to 127.0.0.1 if resolution fails.
+
+    Tries the given target, then a couple of RFC1918 fallbacks (useful
+    in LAN-only setups where 1.1.1.1 might be firewalled). If every
+    probe fails, returns ``"127.0.0.1"`` AND emits a WARNING — the
+    loopback is almost never what the caller wants (UniFi Protect
+    will cache it as the camera's address and refuse to stream from
+    itself), so a silent fallback would be harmful.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect((target_host, 80))
-        return s.getsockname()[0]
-    except OSError:
-        logger.debug("Local IP detection failed, using loopback")
-        return "127.0.0.1"
-    finally:
-        s.close()
+    for target in (target_host, "192.168.1.1", "10.0.0.1"):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((target, 80))
+            return s.getsockname()[0]
+        except OSError:
+            continue
+        finally:
+            s.close()
+
+    logger.warning(
+        "Could not detect a routable local IP (every UDP-connect probe "
+        "failed). Falling back to 127.0.0.1 — this is unusable for UniFi "
+        "adoption; set `ip:` explicitly under each camera in config.yml."
+    )
+    return "127.0.0.1"

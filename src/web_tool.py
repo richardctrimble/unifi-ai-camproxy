@@ -226,6 +226,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="status-grid">
         <div class="status-item"><span class="status-label">UniFi Host</span><span id="s-host" class="status-value">—</span></div>
+        <div class="status-item"><span class="status-label">Local IP (advertised)</span><span id="s-local-ip" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Username</span><span id="s-user" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">API key</span><span id="s-apikey" class="status-value">—</span></div>
         <div class="status-item"><span class="status-label">Uptime</span><span id="s-uptime" class="status-value">—</span></div>
@@ -510,6 +511,12 @@ async function refreshStatus() {
     const data = await (await fetch('/api/status')).json();
 
     document.getElementById('s-host').textContent = data.unifi_host || '—';
+    // Detected LAN IP — the value UniFi Protect caches as the camera's
+    // address. Loopback is a trap (NVR can't stream from itself), highlight.
+    const lipEl = document.getElementById('s-local-ip');
+    const lip = data.local_ip || '';
+    lipEl.textContent = lip || '—';
+    lipEl.style.color = (lip && (lip.startsWith('127.') || lip === '::1')) ? '#f87' : '';
     document.getElementById('s-user').textContent = data.unifi_username || '—';
     document.getElementById('s-apikey').textContent = data.unifi_has_api_key ? 'set' : 'not set';
     document.getElementById('s-uptime').textContent = fmtUptime(data.uptime_seconds || 0);
@@ -1354,6 +1361,7 @@ class LineTool:
         adoption_probe: Optional[Callable[[], dict]] = None,
         lockout_probe: Optional[Callable[[], dict]] = None,
         heartbeat_probe: Optional[Callable[[], dict]] = None,
+        local_ip_probe: Optional[Callable[[], str]] = None,
     ):
         self.registry = registry
         self.config = config
@@ -1361,12 +1369,13 @@ class LineTool:
         self._error_registry = error_registry or {}
         self._reconnect_registry = reconnect_registry or {}
         # Callables injected by main.py that return snapshots of adoption-
-        # token refresh stats, the auth cooldown and the heartbeat tick.
-        # Kept as callables (not dicts) so the Status tab always sees
-        # fresh values on each poll.
+        # token refresh stats, the auth cooldown, the heartbeat tick, and
+        # the detected LAN IP. Kept as callables (not dicts) so the Status
+        # tab always sees fresh values on each poll.
         self._adoption_probe = adoption_probe
         self._lockout_probe = lockout_probe
         self._heartbeat_probe = heartbeat_probe
+        self._local_ip_probe = local_ip_probe
         self._start_time = time.monotonic()
         # Short-lived cache of last-good JPEG per camera so repeated Refresh
         # clicks (and the Lines-tab auto-refresh poller) don't re-open RTSP
@@ -1865,6 +1874,7 @@ class LineTool:
             "adoption": self._adoption_probe() if self._adoption_probe else {},
             "auth_lockout": self._lockout_probe() if self._lockout_probe else {},
             "heartbeat": self._heartbeat_probe() if self._heartbeat_probe else {},
+            "local_ip": self._local_ip_probe() if self._local_ip_probe else "",
         }
         return web.json_response(payload)
 

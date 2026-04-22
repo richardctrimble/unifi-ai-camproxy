@@ -39,10 +39,21 @@ camera_reconnects: Dict[str, int] = {}
 # a liveness indicator.
 _last_heartbeat_epoch: float = 0.0
 
+# Detected local IPv4 address, cached once at startup and surfaced to
+# the Status tab. This is the value that goes into each camera's
+# adoption payload, so seeing it in the UI lets the user sanity-check
+# "what UniFi Protect will see" before pressing Adopt.
+_detected_local_ip: str = ""
+
 
 def get_heartbeat_state() -> dict:
     """Snapshot of the heartbeat timestamp for the web UI."""
     return {"last_epoch": _last_heartbeat_epoch or None}
+
+
+def get_local_ip() -> str:
+    """The detected LAN IP used in camera adoption payloads."""
+    return _detected_local_ip
 
 def _configure_logging() -> None:
     """Configure root logging.
@@ -203,13 +214,38 @@ def fill_camera_defaults(cam_cfg: dict, local_ip: str) -> dict:
     """
     Populate optional fields so the user only has to write rtsp_url + name.
     Returns the same dict, mutated.
+
+    Refuses to use a loopback address — UniFi Protect caches whatever
+    IP the camera advertises during its first adoption, and 127.0.0.1
+    means the NVR tries to pull RTSP from itself. If the resolved IP
+    is loopback we log ERROR and leave ``ip`` unset so the camera is
+    filtered out by the caller rather than silently wedging Protect.
     """
     name = cam_cfg.get("name") or "camera"
     if not cam_cfg.get("mac"):
         cam_cfg["mac"] = generate_mac(name)
         logger.info("Generated fake MAC for %s: %s", name, cam_cfg["mac"])
-    if not cam_cfg.get("ip"):
-        cam_cfg["ip"] = local_ip
+    existing_ip = (cam_cfg.get("ip") or "").strip()
+    if existing_ip.startswith("127.") or existing_ip == "::1":
+        logger.error(
+            "Camera '%s' has ip=%s (loopback). UniFi Protect will cache "
+            "this and refuse to stream. Remove the `ip:` line or set it "
+            "to the LAN IP of this host — the camera will be skipped "
+            "until you do.",
+            name, existing_ip,
+        )
+        cam_cfg.pop("ip", None)
+    elif not existing_ip:
+        if local_ip.startswith("127.") or local_ip == "::1":
+            logger.error(
+                "Refusing to auto-assign loopback IP %s to camera '%s'. "
+                "Set `ip:` explicitly under this camera in config.yml, "
+                "e.g. the LAN address of this host. The camera will be "
+                "skipped until fixed.",
+                local_ip, name,
+            )
+        else:
+            cam_cfg["ip"] = local_ip
     return cam_cfg
 
 
@@ -600,7 +636,8 @@ async def main():
                         reconnect_registry=camera_reconnects,
                         adoption_probe=get_adoption_state,
                         lockout_probe=get_auth_lockout_state,
-                        heartbeat_probe=get_heartbeat_state)
+                        heartbeat_probe=get_heartbeat_state,
+                        local_ip_probe=get_local_ip)
         logger.info("Starting web UI on port %d", port)
         tasks.append(asyncio.create_task(tool.run(port)))
 
@@ -663,17 +700,32 @@ async def main():
         return
 
     # 4. Fill in optional per-camera defaults
+    global _detected_local_ip
     local_ip = detect_local_ip()
+    _detected_local_ip = local_ip
     logger.info("Detected local IP: %s", local_ip)
     for cam in valid_cameras:
         fill_camera_defaults(cam, local_ip)
 
+    # Drop any camera that came out of fill_camera_defaults without an `ip`
+    # — that means we refused to assign a loopback address. Better to skip
+    # the worker than let it crash-loop forever on KeyError, and the ERROR
+    # log from fill_camera_defaults already told the user what to do.
+    runnable_cameras = []
+    for cam in valid_cameras:
+        if not cam.get("ip"):
+            camera_errors[cam.get("name", "<unnamed>")] = (
+                "No LAN IP available — set `ip:` under this camera in config.yml."
+            )
+            continue
+        runnable_cameras.append(cam)
+
     # 5. Start all camera workers + the background auto-adopt task
     tasks.extend(
         asyncio.create_task(run_camera(cam, cfg, token))
-        for cam in valid_cameras
+        for cam in runnable_cameras
     )
-    tasks.append(asyncio.create_task(auto_adopt_pending(cfg, valid_cameras)))
+    tasks.append(asyncio.create_task(auto_adopt_pending(cfg, runnable_cameras)))
 
     # Use return_exceptions=True so one task failure doesn't kill the others.
     # Individual camera tasks already have their own retry logic.
