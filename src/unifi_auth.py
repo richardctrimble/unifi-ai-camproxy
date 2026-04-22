@@ -366,3 +366,58 @@ class UniFiProtectClient:
         except Exception as e:
             logger.warning("Adoption PATCH for %s failed: %s", mac, e)
             return False
+
+    async def unadopt_camera(self, camera_id: str) -> dict:
+        """Remove a camera from Protect — pending or adopted.
+
+        Protect 7.x hides the "Forget" action for pending cameras, which
+        leaves any initial adoption that advertised the wrong IP stuck
+        in the UI forever. There is no official API docs for removal, so
+        we try the two most likely endpoints and report which one (if any)
+        the controller accepts:
+
+          1. ``DELETE /proxy/protect/api/cameras/{id}``
+          2. ``PATCH  /proxy/protect/api/cameras/{id}`` with
+             ``{"isAdopted": false, "isAdopting": false}``
+
+        Returns a dict with ``ok`` (bool), ``method`` (which one worked
+        or was tried last), ``status`` (HTTP status) and ``message``.
+        """
+        base = f"{self.host}/proxy/protect/api/cameras/{camera_id}"
+        attempts: list[str] = []
+
+        # 1. DELETE
+        try:
+            async with self._session.delete(base, headers=self._headers()) as r:
+                body = (await r.text())[:200]
+                attempts.append(f"DELETE → {r.status}")
+                if 200 <= r.status < 300:
+                    logger.info("Removed camera %s via DELETE", camera_id)
+                    return {"ok": True, "method": "DELETE", "status": r.status,
+                            "message": "Camera removed via DELETE"}
+                if r.status not in (404, 405):
+                    # Not a "method/route not supported" response — return
+                    # the actual error rather than masking it with the PATCH
+                    # attempt.
+                    return {"ok": False, "method": "DELETE", "status": r.status,
+                            "message": f"DELETE {r.status}: {body}"}
+        except Exception as e:
+            attempts.append(f"DELETE error: {e}")
+
+        # 2. PATCH — reverse of the adoption call.
+        headers = self._headers({"Content-Type": "application/json"})
+        payload = {"isAdopted": False, "isAdopting": False}
+        try:
+            async with self._session.patch(base, json=payload, headers=headers) as r:
+                body = (await r.text())[:200]
+                attempts.append(f"PATCH → {r.status}")
+                if 200 <= r.status < 300:
+                    logger.info("Removed camera %s via PATCH isAdopted:false", camera_id)
+                    return {"ok": True, "method": "PATCH", "status": r.status,
+                            "message": "Camera reset via PATCH isAdopted:false"}
+                return {"ok": False, "method": "PATCH", "status": r.status,
+                        "message": f"PATCH {r.status}: {body}"}
+        except Exception as e:
+            attempts.append(f"PATCH error: {e}")
+            return {"ok": False, "method": "PATCH", "status": 0,
+                    "message": "; ".join(attempts)}

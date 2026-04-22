@@ -367,6 +367,24 @@ INDEX_HTML = r"""<!doctype html>
         <span id="u-result" style="font-size:13px;"></span>
       </div>
     </div>
+
+    <!-- ── Pending / rogue camera cleanup ── -->
+    <div class="card">
+      <div class="card-header"><h3>Cameras in Protect</h3></div>
+      <div class="hint" style="margin-bottom:10px;">
+        Protect 7.x hides the <em>Forget</em> action for pending cameras,
+        so if a camera ever registered with the wrong address (e.g.
+        <code>127.0.0.1</code> from a bad first adoption) there's no way
+        to clear it from the Protect UI. Remove the stale record here,
+        then restart the container — the next adoption will re-register
+        with the correct IP.
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+        <button id="u-cams-refresh" class="btn-sm">Refresh list</button>
+        <span id="u-cams-status" style="font-size:13px;color:#aaa;"></span>
+      </div>
+      <div id="u-cams-list"><span class="empty-msg">Click Refresh to load cameras from Protect.</span></div>
+    </div>
   </div>
 
   <!-- ═══ SETUP TAB ═══ -->
@@ -1180,6 +1198,94 @@ document.getElementById('u-test-apikey').addEventListener('click', () =>
 document.getElementById('u-fetch-token').addEventListener('click', () =>
   runUnifiTest('fetch_token', 'u-result-token'));
 
+/* ── Protect camera list (for removing stuck pending entries) ─────────── */
+async function refreshProtectCameras() {
+  const statusEl = document.getElementById('u-cams-status');
+  const listEl = document.getElementById('u-cams-list');
+  statusEl.textContent = 'Loading…';
+  try {
+    const resp = await fetch('/api/unifi/cameras');
+    const data = await resp.json();
+    if (!data.ok) {
+      statusEl.textContent = data.message || 'Failed to load';
+      statusEl.style.color = '#f87';
+      listEl.innerHTML = '';
+      return;
+    }
+    statusEl.textContent = data.cameras.length + ' camera(s) returned by Protect';
+    statusEl.style.color = '#aaa';
+    renderProtectCameras(data.cameras);
+  } catch (e) {
+    statusEl.textContent = 'Request failed';
+    statusEl.style.color = '#f87';
+  }
+}
+
+function renderProtectCameras(cams) {
+  const listEl = document.getElementById('u-cams-list');
+  if (!cams.length) {
+    listEl.innerHTML = '<span class="empty-msg">No cameras returned.</span>';
+    return;
+  }
+  let html = '<div class="cam-row header" style="grid-template-columns:1.4fr 1.4fr 1.2fr 1fr 1fr auto;">' +
+    '<span>Name</span><span>MAC</span><span>IP / host</span><span>State</span><span>Type</span><span></span></div>';
+  for (const c of cams) {
+    const state = c.is_adopted ? 'adopted' : (c.is_adopting ? 'adopting' : (c.state || 'pending'));
+    const stateColor = c.is_adopted ? '#4c4' : '#fa4';
+    const loopback = (c.host || '').startsWith('127.');
+    const hostStyle = loopback ? 'color:#f87;' : '';
+    // Only offer Remove for non-adopted cameras — we don't want to
+    // accidentally unadopt a working camera from the web UI.
+    const canRemove = !c.is_adopted;
+    const btn = canRemove
+      ? '<button class="btn-sm btn-danger" data-cam-id="' + esc(c.id || '') + '" data-cam-name="' + esc(c.name) + '">Remove</button>'
+      : '<span style="color:#666;font-size:12px;">adopted</span>';
+    html += '<div class="cam-row" style="grid-template-columns:1.4fr 1.4fr 1.2fr 1fr 1fr auto;">' +
+      '<span>' + esc(c.name) + '</span>' +
+      '<span style="font-family:monospace;font-size:12px;">' + esc(c.mac) + '</span>' +
+      '<span style="font-family:monospace;font-size:12px;' + hostStyle + '">' + esc(c.host || '—') + '</span>' +
+      '<span style="color:' + stateColor + ';">' + esc(state) + '</span>' +
+      '<span style="font-size:12px;color:#888;">' + esc(c.type || '') + '</span>' +
+      '<span>' + btn + '</span>' +
+      '</div>';
+  }
+  listEl.innerHTML = html;
+
+  // Wire the Remove buttons we just rendered
+  listEl.querySelectorAll('button[data-cam-id]').forEach(b => {
+    b.addEventListener('click', () => removeProtectCamera(b.dataset.camId, b.dataset.camName));
+  });
+}
+
+async function removeProtectCamera(id, name) {
+  if (!id) return;
+  if (!confirm('Remove "' + name + '" from Protect? This only affects the Protect side; your config.yml is untouched.')) return;
+  const statusEl = document.getElementById('u-cams-status');
+  statusEl.textContent = 'Removing ' + name + '…';
+  statusEl.style.color = '#aaa';
+  try {
+    const resp = await fetch('/api/unifi/remove-camera', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      statusEl.textContent = 'Removed ' + name + ' (' + (data.method || '?') + ')';
+      statusEl.style.color = '#4c4';
+      refreshProtectCameras();
+    } else {
+      statusEl.textContent = 'Failed: ' + (data.message || 'unknown');
+      statusEl.style.color = '#f87';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Request failed';
+    statusEl.style.color = '#f87';
+  }
+}
+
+document.getElementById('u-cams-refresh').addEventListener('click', refreshProtectCameras);
+
 document.getElementById('u-save').addEventListener('click', async () => {
   setUnifiResult(true, 'Saving…');
   uResult.style.color = '#aaa';
@@ -1401,6 +1507,8 @@ class LineTool:
         self.app.router.add_get("/api/unifi", self._get_unifi)
         self.app.router.add_post("/api/unifi", self._save_unifi)
         self.app.router.add_post("/api/test-unifi", self._test_unifi)
+        self.app.router.add_get("/api/unifi/cameras", self._list_protect_cameras)
+        self.app.router.add_post("/api/unifi/remove-camera", self._remove_protect_camera)
         self.app.router.add_post("/api/restart", self._restart_container)
 
     # ── helpers ─────────────────────────────────────────────────────────────
@@ -2247,6 +2355,115 @@ class LineTool:
         return web.json_response(
             {"ok": True, "message": f"Fetched fresh token: {masked}"}
         )
+
+    async def _list_protect_cameras(self, request: web.Request) -> web.Response:
+        """List every camera Protect knows about — pending and adopted.
+
+        Powers the 'Clean up pending cameras' panel in the UniFi tab.
+        Protect 7.x no longer shows a Forget button for pending cameras,
+        so we surface them here with their MAC / IP so the user can see
+        (and remove) the stale records left over from earlier adoption
+        attempts with the wrong IP.
+        """
+        self._reload_config()
+        unifi_cfg = self.config.get("unifi", {}) or {}
+        host = unifi_cfg.get("host") or ""
+        username = unifi_cfg.get("username") or ""
+        password = unifi_cfg.get("password") or ""
+        api_key = unifi_cfg.get("api_key") or ""
+
+        if not host or not (username and password):
+            return web.json_response({
+                "ok": False,
+                "message": "Need host + username + password to list Protect cameras.",
+                "cameras": [],
+            })
+
+        from unifi_auth import UniFiProtectClient, UniFiAuthError
+        try:
+            async with UniFiProtectClient(host, username, password,
+                                          api_key=api_key) as client:
+                cams = await client.list_cameras()
+        except UniFiAuthError as exc:
+            return web.json_response({"ok": False, "message": str(exc), "cameras": []})
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "message": f"Unexpected error: {exc}", "cameras": []}
+            )
+
+        out = []
+        for cam in cams:
+            if not isinstance(cam, dict):
+                continue
+            out.append({
+                "id": cam.get("id"),
+                "name": cam.get("name") or "<unnamed>",
+                "mac": cam.get("mac") or "",
+                "host": cam.get("host") or "",
+                "type": cam.get("type") or cam.get("modelKey") or "",
+                "is_adopted": bool(cam.get("isAdopted")),
+                "is_adopting": bool(cam.get("isAdopting")),
+                "state": cam.get("state") or "",
+            })
+        return web.json_response({"ok": True, "cameras": out})
+
+    async def _remove_protect_camera(self, request: web.Request) -> web.Response:
+        """DELETE / unadopt a camera record in Protect.
+
+        The UI restricts the Remove button to pending cameras, but we also
+        re-check ``isAdopted`` server-side before proceeding so a stale
+        browser tab can't accidentally unadopt a working camera.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid JSON")
+        camera_id = (body.get("id") or "").strip()
+        if not camera_id:
+            return web.json_response({"ok": False, "message": "Camera id required"})
+
+        self._reload_config()
+        unifi_cfg = self.config.get("unifi", {}) or {}
+        host = unifi_cfg.get("host") or ""
+        username = unifi_cfg.get("username") or ""
+        password = unifi_cfg.get("password") or ""
+        api_key = unifi_cfg.get("api_key") or ""
+
+        if not host or not (username and password):
+            return web.json_response({
+                "ok": False,
+                "message": "Need host + username + password to remove cameras.",
+            })
+
+        from unifi_auth import UniFiProtectClient, UniFiAuthError
+        try:
+            async with UniFiProtectClient(host, username, password,
+                                          api_key=api_key) as client:
+                # Re-check adoption state server-side before removing.
+                cams = await client.list_cameras()
+                match = next(
+                    (c for c in cams if isinstance(c, dict) and c.get("id") == camera_id),
+                    None,
+                )
+                if match is None:
+                    return web.json_response(
+                        {"ok": False, "message": "Camera id not found in Protect"}
+                    )
+                if match.get("isAdopted") and not body.get("force"):
+                    return web.json_response({
+                        "ok": False,
+                        "message": (
+                            "Refusing to remove an adopted camera. Pass "
+                            "force=true if you really mean it."),
+                    })
+                result = await client.unadopt_camera(camera_id)
+        except UniFiAuthError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "message": f"Unexpected error: {exc}"}
+            )
+        return web.json_response(result)
 
     async def _restart_container(self, request: web.Request) -> web.Response:
         """Trigger a graceful container restart by exiting the process.
