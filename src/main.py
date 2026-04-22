@@ -574,16 +574,37 @@ async def _run_camera_once(cam_cfg: dict, global_cfg: dict, token: str):
         )
         _rtsp_transport = "tcp"
 
+    # ffmpeg audio/video flags — built from per-camera config so the usual
+    # silent failure (source has no audio, AAC encoder errors out, Protect
+    # gets nothing) stops being the default. Opt in to audio only when the
+    # source actually has it.
+    if cam_cfg.get("audio"):
+        _audio_args = "-ar 32000 -ac 1 -codec:a aac -b:a 32k"
+    else:
+        _audio_args = "-an"
+
+    # H.265 sources are common on budget cameras; Protect only accepts
+    # H.264 from spoofed cameras, so `transcode: true` flips copy → libx264.
+    if cam_cfg.get("transcode"):
+        _video_args = "-c:v libx264 -preset veryfast -tune zerolatency"
+    else:
+        _video_args = "-c:v copy"
+
+    _ffmpeg_args = f"{_video_args} {_audio_args}"
+
     class Args:
         host = global_cfg["unifi"]["host"]
         token = _token
         mac = cam_cfg["mac"]
         ip = cam_cfg["ip"]
         name = cam_cfg["name"]
-        model = cam_cfg.get("model", "UVC G4 Pro")
+        # Default to an AI-capable model so Protect exposes smart-detect
+        # events in its UI. Override per-camera with `model:` in config.yml
+        # if you want a non-AI camera appearance.
+        model = cam_cfg.get("model", "UVC AI Pro")
         fw_version = cam_cfg.get("fw_version", "4.69.55")
         cert = cert_path
-        ffmpeg_args = "-c:v copy -ar 32000 -ac 1 -codec:a aac -b:a 32k"
+        ffmpeg_args = _ffmpeg_args
         rtsp_transport = _rtsp_transport
 
     args = Args()

@@ -774,6 +774,30 @@ function createCameraCard(cam, idx) {
         </select>
         <div class="example">Use udp only if your camera/network prefers it</div>
       </div>
+      <div class="field">
+        <label>Protect model</label>
+        <select data-key="model">
+          <option value="UVC AI Pro" ${(!cam.model || cam.model === 'UVC AI Pro') ? 'selected' : ''}>UVC AI Pro — default, AI UI enabled</option>
+          <option value="UVC AI 360" ${cam.model === 'UVC AI 360' ? 'selected' : ''}>UVC AI 360 — AI fisheye</option>
+          <option value="UVC AI Bullet" ${cam.model === 'UVC AI Bullet' ? 'selected' : ''}>UVC AI Bullet — AI bullet</option>
+          <option value="UVC G4 Pro" ${cam.model === 'UVC G4 Pro' ? 'selected' : ''}>UVC G4 Pro — legacy non-AI</option>
+        </select>
+        <div class="example">Must be an "AI" model for Protect to show smart-detect UI</div>
+      </div>
+      <div class="field">
+        <label class="field-row">
+          <input type="checkbox" data-key="audio" ${cam.audio ? 'checked' : ''}>
+          Include audio
+        </label>
+        <div class="example">Only enable if your RTSP source has audio — otherwise ffmpeg fails silently and video goes black in Protect</div>
+      </div>
+      <div class="field">
+        <label class="field-row">
+          <input type="checkbox" data-key="transcode" ${cam.transcode ? 'checked' : ''}>
+          Transcode to H.264
+        </label>
+        <div class="example">Enable if your source camera is H.265 — Protect only accepts H.264 from spoofed cameras. Costs CPU.</div>
+      </div>
     </div>
 
     <h3 style="margin-top:16px;">AI detection</h3>
@@ -1782,6 +1806,15 @@ class LineTool:
                 if transport == "tcp":
                     # tcp is the default — keep config minimal
                     cam.pop("rtsp_transport", None)
+
+            # Drop defaults so the stored YAML stays short: only persist
+            # these fields when the user deliberately changed them.
+            if cam.get("model") in (None, "", "UVC AI Pro"):
+                cam.pop("model", None)
+            if not cam.get("audio"):
+                cam.pop("audio", None)
+            if not cam.get("transcode"):
+                cam.pop("transcode", None)
 
             ai = cam.get("ai", {})
             if ai is not None and not isinstance(ai, dict):
