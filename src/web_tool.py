@@ -1397,12 +1397,21 @@ class LineTool:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _reload_config(self) -> dict:
-        """Re-read config.yml from disk, keeping the last-good config on error."""
+        """Re-read config.yml from disk, keeping the last-good config on error.
+
+        Mutates ``self.config`` in place rather than replacing the reference.
+        ``main.py`` passes a single shared ``cfg`` dict into both LineTool
+        and every ``run_camera`` task — if we rebound ``self.config`` to a
+        new dict, the camera workers would still hold the old one and never
+        see credential updates from the UniFi tab, which is why token
+        rotation silently stopped refreshing.
+        """
         if self.config_path.exists():
             try:
                 with open(self.config_path) as f:
                     loaded = yaml.safe_load(f) or {}
-                self.config = loaded
+                self.config.clear()
+                self.config.update(loaded)
             except (yaml.YAMLError, OSError) as exc:
                 logger.warning("Failed to reload config from %s: %s", self.config_path, exc)
         return self.config

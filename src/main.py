@@ -333,6 +333,11 @@ _token_refresh_last_err_status: Optional[int] = None
 _token_refresh_last_err_msg: str = ""
 _token_refresh_last_value: str = ""
 
+# Guard flag: set to True once we've logged the "skipping refresh, no creds"
+# warning, so the main loop doesn't spam it every retry. Cleared the next
+# time creds are present so a later credential change re-logs.
+_token_refresh_nocreds_warned: bool = False
+
 
 def _mask_token(tok: str) -> str:
     """Show only the first 6 + last 4 chars of a token; never full secret."""
@@ -417,8 +422,22 @@ async def _refresh_adoption_token(global_cfg: dict) -> Optional[str]:
     username = unifi_cfg.get("username")
     password = unifi_cfg.get("password")
 
+    global _token_refresh_nocreds_warned
     if not host or not (api_key or (username and password)):
+        if not _token_refresh_nocreds_warned:
+            reason = ("no unifi.host" if not host
+                      else "no api_key and no username+password")
+            logger.warning(
+                "Token refresh skipped (%s). Cameras will keep using the "
+                "stored adoption token, which Protect 7.x consumes on first "
+                "use — every reconnect will then fail. Add credentials in "
+                "the UniFi tab to enable rotation.",
+                reason,
+            )
+            _token_refresh_nocreds_warned = True
         return None
+    # Creds are back — allow a future absence to log again.
+    _token_refresh_nocreds_warned = False
 
     global _token_refresh_ok_count, _token_refresh_last_ok_epoch
     global _token_refresh_last_value
