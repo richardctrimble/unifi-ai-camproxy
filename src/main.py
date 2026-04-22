@@ -419,6 +419,18 @@ def _set_auth_lockout(seconds: float, reason: str) -> None:
     _auth_lockout_reason = reason
 
 
+def clear_auth_lockout() -> None:
+    """Clear any active auth cooldown. Called from the web UI when the
+    user saves new credentials — we shouldn't force them to wait 10–15 min
+    just because the *previous* password was wrong."""
+    global _auth_lockout_until, _auth_lockout_reason, _token_refresh_nocreds_warned
+    if _auth_lockout_until > 0:
+        logger.info("Auth lockout cleared (credentials updated)")
+    _auth_lockout_until = 0.0
+    _auth_lockout_reason = ""
+    _token_refresh_nocreds_warned = False
+
+
 def _auth_lockout_remaining() -> float:
     """Seconds left on the cooldown (0 if not in cooldown)."""
     remaining = _auth_lockout_until - asyncio.get_event_loop().time()
@@ -657,6 +669,7 @@ async def main():
                         reconnect_registry=camera_reconnects,
                         adoption_probe=get_adoption_state,
                         lockout_probe=get_auth_lockout_state,
+                        lockout_clear=clear_auth_lockout,
                         heartbeat_probe=get_heartbeat_state,
                         local_ip_probe=get_local_ip)
         logger.info("Starting web UI on port %d", port)

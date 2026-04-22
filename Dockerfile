@@ -3,7 +3,14 @@ FROM python:3.11-slim AS proxy-builder
 
 WORKDIR /build
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth=1 https://github.com/keshavdv/unifi-cam-proxy.git
+
+# Pin upstream to a known-good commit so rebuilds are reproducible.
+# Bump this after testing against a newer commit — don't track HEAD.
+# Last reviewed: Apr 2026. See SECONDBRAIN.md "Protocol state" for the
+# reversing landscape and which upstream PRs are worth cherry-picking.
+ARG UNIFI_CAM_PROXY_REF=cc6d3fc7cdae9f1dfce575627089632aec696403
+RUN git clone https://github.com/keshavdv/unifi-cam-proxy.git \
+    && git -C unifi-cam-proxy checkout "$UNIFI_CAM_PROXY_REF"
 
 # ── Stage 2: final image ──────────────────────────────────────────────────────
 FROM python:3.11-slim

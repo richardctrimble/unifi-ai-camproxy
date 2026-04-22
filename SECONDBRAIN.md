@@ -389,3 +389,146 @@ YOLO model sizing:
   camera name and RTSP URL. Adoption token, fake MAC, local IP and the final
   "accept adoption" click are now all handled automatically against the
   local UniFi controller.
+
+---
+
+## Protocol state — Apr 2026 landscape (for later)
+
+Research done after Protect 7.x adoption pain. Nobody has publicly
+reverse-engineered the modern camera-side protocol used by G5 Pro / AI
+Pro 4K to stream H.265 natively. All community effort is still patching
+the legacy AVClient path (ws 7442 + FLV upload to 7550) against Protect
+7.x regressions. The only sanctioned "new protocol" that accepts H.265
+from third-party sources is **ONVIF via Protect 5.0+**, and that path
+loses motion / PTZ / smart-detect / two-way audio.
+
+### Things actually worth watching
+
+- **keshavdv/unifi-cam-proxy PR #419** — by `nalditopr`, open Apr 2026.
+  Replaces the broken FLV-to-7550 pipe with a call to Protect's internal
+  EvoStream `ms` binary on `localhost:1112` using the text `pullStream`
+  command. This is how real UniFi cameras are ingested on 7.x internally.
+  Still H.264-only; no HEVC. If our video-ingest starts misbehaving on a
+  future Protect update, cherry-pick this into the vendored proxy.
+  <https://github.com/keshavdv/unifi-cam-proxy/pull/419>
+
+- **keshavdv/unifi-cam-proxy Issue #416** — Mar 2026, no PR. Captured an
+  NVR `ChangeVideoSettings` showing Protect 7.x now expects
+  **extendedFLV + Opus 24 kHz** (Ubiquiti's `ExVideoTagHeader` wrapper).
+  AAC streams get "broken pipe" on 7550. Our current setup works because
+  we default audio OFF (`-an`) — when Protect tightens the check this
+  might bite even H.264 streams. Best public intel on what changed.
+  <https://github.com/keshavdv/unifi-cam-proxy/issues/416>
+
+- **p10tyr/rtsp-to-onvif** — Not a spoofer. Wraps RTSP as a virtual
+  ONVIF device that Protect 5+ discovers and adopts. H.265 passes
+  through unmodified, but there's no hook for injecting our YOLO
+  detections — so no AI-camera integration, no smart-detect events.
+  Viable as a fallback path for cameras where we only need footage,
+  not AI overlays. <https://github.com/p10tyr/rtsp-to-onvif>
+
+### Dead ends — don't revisit
+
+- `hjdhjd/unifi-protect`, `uilibs/uiprotect` — NVR client-side APIs only,
+  zero camera-side reversing in either repo.
+- Go / Rust / TypeScript reimplementations in the search — all NVR
+  clients, none spoof the camera side.
+- Gists, HAR files, blog posts on `ubnt_ipcs` or similar terms — the
+  string doesn't appear to be real public nomenclature. (I had
+  hallucinated it earlier.)
+
+### Decision
+
+Commit to the H.265 → H.264 transcode path. Not worth waiting 6 months
+for a native HEVC spoofer to materialise — there's no momentum. The
+Setup tab now has a Transcode checkbox per camera; cost is one CPU
+encode per H.265 source but Intel iGPUs can offload via `h264_qsv` if
+it becomes a problem.
+
+### What could force a revisit
+
+- Ubiquiti actually enforces extendedFLV + Opus on 7550 → even H.264
+  breaks → we'd need to implement PR #419's pullStream path or adopt
+  the ONVIF fallback.
+- Someone lands a working modern-protocol spoof in keshavdv upstream
+  (unlikely in the next 6 months based on current velocity).
+
+---
+
+## Operational details worth remembering
+
+### ai_udp_port plumbing
+
+Each camera pipes `video1`'s ffmpeg output to *two* destinations:
+
+1. FLV stream → Protect's ingest (the user-visible feed).
+2. MPEGTS-copy (`-c:v copy -an`) → `udp://127.0.0.1:<port>` → AIEngine.
+
+The UDP loopback is how the AI engine gets frames without opening a
+second RTSP connection to the camera (many cameras reject concurrent
+connections). Ports are auto-assigned from a class-level counter
+starting at 5200; override per-camera with `ai.ai_udp_port` in
+`config.yml` when you need deterministic ports or have firewall rules
+constraining the default range. Each camera MUST use a unique port;
+the counter prevents collisions but a manual override can clash.
+
+### TrueNAS app first-boot workflow
+
+The Docker Compose file passes Protect creds as env vars. On first
+boot, `docker-entrypoint.py` generates a minimal `config.yml` with
+those creds and `cameras: []`. The app starts in **web-only mode**
+(no cameras → nothing to adopt). The user adds cameras via the
+Setup tab; config is persisted to the mounted dataset. After an
+app restart, `main.py` reads the full config, adopts cameras, starts
+inference.
+
+Env vars override the stored config at every container start — if
+the user changes `UNIFI_HOST` in TrueNAS, that propagates to
+`config.yml` on next boot. The web UI's UniFi tab is the more
+ergonomic path; env vars are for TrueNAS-wizard-driven installs.
+
+### Protect model strings and AI behaviour
+
+Protect gates the "AI camera" UI on the `model` string advertised in
+the adoption payload. The defaults that trigger AI UI in 7.x:
+
+- `UVC AI Pro` — default we ship
+- `UVC AI 360` — fisheye
+- `UVC AI Bullet` — bullet
+
+`UVC G4 Pro` and older G-series names adopt successfully but Protect
+treats them as non-AI — our `EventSmartDetect` events are ignored.
+Changing the model on an already-adopted camera requires re-adopting
+(Protect caches capability flags).
+
+### Intel GPU driver choice
+
+We ship Debian's `intel-opencl-icd` (compute-runtime 22.43) rather
+than Intel's "noble unified" apt repo. Debian 22.43 still bundles
+Gen8–Gen12 in one package, covering every TrueNAS-class CPU
+(N100/N200, UHD 610/620/630, i3–i7 iGPUs). Intel's modern repo
+split legacy drivers into `-legacy1` packages that aren't reliably
+in the channel — builds kept going green while leaving Gen9 users
+without a driver. Trade-off: Arc / Xe dGPUs get the older 22.43
+driver rather than the latest perf tuning, but practically no one
+runs those in a TrueNAS box.
+
+`libze1` (Level Zero loader) is from Debian too; `intel-level-zero-gpu`
+is installed best-effort (not in every Debian snapshot). OpenVINO
+falls back to OpenCL when L0 isn't available, which is fine for
+Gen9–Gen11.
+
+`intel-opencl-icd` lives in Debian's `non-free-firmware` component
+(binary firmware blobs), which `python:3.11-slim` doesn't enable by
+default — Dockerfile adds a supplementary sources.list entry for it.
+
+### Versioning scheme
+
+Calendar versioning `YYYY.M.R`:
+- `YYYY` four-digit year
+- `M` month, no leading zero
+- `R` release number within that month (1, 2, 3…)
+
+Tags: `2026.4.1`, `2026.4.14`, `2026.5.1`. Pushing a tag triggers
+the CI workflow to build and publish both `:<tag>` and
+`:<tag>-cuda` images to GHCR. `:latest` tracks `main` HEAD.

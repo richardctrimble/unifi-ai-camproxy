@@ -1490,6 +1490,7 @@ class LineTool:
         reconnect_registry: Optional[Dict[str, int]] = None,
         adoption_probe: Optional[Callable[[], dict]] = None,
         lockout_probe: Optional[Callable[[], dict]] = None,
+        lockout_clear: Optional[Callable[[], None]] = None,
         heartbeat_probe: Optional[Callable[[], dict]] = None,
         local_ip_probe: Optional[Callable[[], str]] = None,
     ):
@@ -1498,12 +1499,12 @@ class LineTool:
         self.config_path = Path(config_path) if config_path else Path("/config/config.yml")
         self._error_registry = error_registry or {}
         self._reconnect_registry = reconnect_registry or {}
-        # Callables injected by main.py that return snapshots of adoption-
-        # token refresh stats, the auth cooldown, the heartbeat tick, and
-        # the detected LAN IP. Kept as callables (not dicts) so the Status
-        # tab always sees fresh values on each poll.
+        # Callables injected by main.py: probes for the Status tab, plus
+        # a lockout-clear hook called when the user saves new credentials
+        # so they don't have to wait out a stale cooldown.
         self._adoption_probe = adoption_probe
         self._lockout_probe = lockout_probe
+        self._lockout_clear = lockout_clear
         self._heartbeat_probe = heartbeat_probe
         self._local_ip_probe = local_ip_probe
         self._start_time = time.monotonic()
@@ -2251,6 +2252,10 @@ class LineTool:
                 status=500,
             )
         logger.info("UniFi credentials updated via web UI (host=%s)", host)
+        # Clear any stale auth cooldown — the new creds might be the fix,
+        # so don't make the user wait 10 min to find out.
+        if self._lockout_clear is not None:
+            self._lockout_clear()
         return web.json_response({
             "ok": True,
             "message": "Saved to config.yml. Restart the container to re-run adoption.",
