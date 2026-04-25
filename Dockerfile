@@ -37,10 +37,11 @@ COPY requirements-onvif.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements-onvif.txt
 
 # Copy the shared modules + the bridge entrypoint.
-# unifi_auth and cert_gen are reused from the spoof image's source tree.
+# unifi_auth is reused from the spoof image's source tree.
 COPY src/unifi_auth.py        /app/src/
 COPY src/build_info.py        /app/src/
 COPY src/onvif_bridge         /app/src/onvif_bridge
+COPY docker-entrypoint.py     /app/
 
 # Build metadata — same scheme as Dockerfile.full so the Status tab can
 # show which image is actually running.
@@ -63,8 +64,9 @@ EXPOSE 8091
 
 WORKDIR /app/src
 
-# Same env-var entrypoint contract as Dockerfile.full: if /config/config.yml
-# exists, use it; if UNIFI_HOST is set, generate one; otherwise crash with
-# a helpful message. The bridge's config schema differs from full mode but
-# the bootstrap dance is identical.
-ENTRYPOINT ["python", "-m", "onvif_bridge.main"]
+# Same env-var entrypoint as Dockerfile.full: docker-entrypoint.py
+# seeds /config/config.yml from env vars (UNIFI_HOST, UNIFI_USERNAME,
+# UNIFI_PASSWORD, UNIFI_API_KEY, ONVIF_USERNAME, ONVIF_PASSWORD,
+# ALARM_WEBHOOK_URL) and then dispatches to onvif_bridge.main based
+# on APP_IMAGE_VARIANT (set above).
+ENTRYPOINT ["python", "/app/docker-entrypoint.py"]

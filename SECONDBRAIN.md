@@ -593,36 +593,80 @@ onvif-zeep.
 two consumers). The bridge image's Dockerfile copies it alongside the
 bridge package.
 
-### Open verification questions (must answer before functional)
+### Verified API contract (Apr 2026)
 
-These are the unknowns that block real implementation. Each is a
-short live-Protect spike to resolve.
+Research against the public OpenAPI spec for Protect 7.0.107 plus
+hjdhjd's `protect-types.ts` and uilibs/uiprotect:
 
-1. **Bookmark endpoint shape** — exact path and payload for
-   `POST /proxy/protect/api/cameras/{id}/bookmarks`. Candidates:
-   ```
-   POST /proxy/protect/api/cameras/{id}/bookmarks
-        body: {"name": ..., "time": <ms>, "color": "#..."}
-   POST /proxy/protect/api/bookmarks
-        body: {"cameraId": ..., "name": ..., "time": <ms>}
-   PATCH /proxy/protect/api/cameras/{id}
-        body: {"bookmarks": [<existing>, <new>]}
-   ```
-   The pusher tries them in order with 404/405 fall-through (same
-   defensive pattern as `unadopt_camera`). Need to verify which works
-   on Protect 7.x and what fields the UI actually displays.
+1. **Bookmark POST — no public-documented endpoint exists.** The
+   official OpenAPI spec for Protect 7 lists 25 paths and none mention
+   bookmarks. Neither hjdhjd's nor uilibs/uiprotect's libraries
+   implement bookmark creation (despite both reverse-engineering the
+   legacy `/proxy/protect/api/*` surface exhaustively). Long-standing
+   feature request: <https://community.ui.com/questions/2dd382ee-ef33-45c8-b87b-2f241bc0cc88>.
+   **Decision**: bookmarks dropped from the bridge. To revisit, capture
+   browser DevTools traffic when clicking "Add Bookmark" in Protect's
+   UI on a live controller.
 
-2. **Alarm Manager custom-webhook trigger** — does the inbound URL
-   accept per-call metadata (camera ID, event type) via query string
-   or POST body? Or is it just a binary "was hit" trigger? Affects
-   whether one webhook serves all cameras or we need one per camera.
+2. **Alarm Manager Custom Webhook — VERIFIED.**
+   - Path: `POST /proxy/protect/integration/v1/alarm-manager/webhook/{id}`
+   - Method: POST only (no GET).
+   - Auth: `X-API-Key` header.
+   - `{id}` is a user-defined string ("alarmTriggerId"); the rule in
+     Protect must be configured with the matching ID to fire.
+   - Returns 204 on success, 400 if id missing.
+   - **No body / metadata propagation** — the spec is silent on body
+     schema and community write-ups never demonstrate template
+     substitution from trigger to action. Treat the URL as the entire
+     discriminator.
+   - Implementation: encode the (camera, event-kind) pair into the
+     ID itself via a template. Default:
+     `onvif-bridge:{protect_id}:{kind}`. User creates one alarm rule
+     per (camera, kind) combination they care about.
+   - Source: <https://github.com/beezly/unifi-apis/blob/main/unifi-protect/7.0.107.json>
 
-3. **ONVIF camera identification in Protect's API** — which field
-   distinguishes a third-party ONVIF adoption from a native UVC one?
-   Candidates documented in `protect_discovery.identify_onvif_camera`:
-   `modelKey`, `type`/`displayName`, `isThirdPartyCamera`. Until
-   verified the helper errs on inclusion (false positives are
-   unticked in the UI, false negatives are a worse failure mode).
+3. **Third-party ONVIF discriminator — VERIFIED.**
+   - Field: `isThirdPartyCamera: boolean` on the legacy
+     `GET /proxy/protect/api/cameras` response.
+   - Secondary fields: `isAdoptedByOther: boolean`, `marketName: string`,
+     `type: string`. `modelKey` is always `"camera"` and does NOT
+     discriminate.
+   - The integration API (`/proxy/protect/integration/v1/cameras`)
+     does NOT expose `isThirdPartyCamera`, so discovery must use the
+     legacy endpoint with cookie + CSRF auth.
+   - Sources: hjdhjd `protect-types.ts` line 788, uilibs
+     `uiprotect/data/devices.py` line 1054.
+
+### Dual auth implications
+
+The bridge needs **both** auth flavours because the surfaces it talks
+to live on different APIs:
+
+- Cookie + `X-CSRF-Token` for `GET /proxy/protect/api/cameras`
+  (camera enumeration, `isThirdPartyCamera` filter).
+- `X-API-Key` for
+  `POST /proxy/protect/integration/v1/alarm-manager/webhook/{id}`
+  (the alarm trigger).
+
+`UniFiProtectClient.__aenter__` already runs the cookie login
+whenever `username` + `password` are set, and `_headers()` attaches
+`X-API-KEY` whenever `api_key` is set. So a single configured client
+covers both. The bridge's pusher uses a separate aiohttp session for
+the integration POST since it's a one-line call and doesn't need
+CSRF state.
+
+### Setup flow for the user
+
+1. In Protect: Settings → Control Plane → Integrations → Create
+   API Key. Paste into `unifi.api_key` (or set `UNIFI_API_KEY`).
+2. In Protect: Alarm Manager → New Alarm. Add a "Custom Webhook"
+   trigger, set the webhook ID to the pattern the bridge will emit
+   (default `onvif-bridge:{protect_id}:{kind}` — substitute the
+   camera's Protect ID and the event kind). Configure the rule's
+   downstream actions (push notification, recording extension, etc.).
+3. Repeat for each (camera, event-kind) combination you care about.
+4. The bridge starts firing those triggers as the camera's onboard
+   AI emits ONVIF events.
 
 ### Status flags (image variant detection)
 

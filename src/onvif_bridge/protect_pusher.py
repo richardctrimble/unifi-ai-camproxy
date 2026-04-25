@@ -1,36 +1,43 @@
 """
-protect_pusher — translate OnvifEvent into something Protect's UI shows.
+protect_pusher — fire UniFi Protect Alarm Manager triggers on ONVIF events.
 
-Two surfaces, used together:
+Single push surface, verified against Protect 7.x:
 
-  1. **Bookmarks** (`POST /proxy/protect/api/cameras/{id}/bookmarks`)
-     Marker on the camera's timeline with a label. Persists with the
-     recording. Cheap and survives Protect restarts. Best for
-     "something happened, here it is on the scrub bar".
+    POST /proxy/protect/integration/v1/alarm-manager/webhook/{id}
+    Auth: X-API-Key
+    Returns: 204 No Content on success, 400 if id is missing.
 
-     OPEN QUESTION (verify against live Protect 7.x): the exact path
-     and JSON body shape. Expected payload is roughly:
-        { "name": "<label>", "time": <epoch_ms>, "color": "<hex?>" }
-     but this needs confirming. The pusher handles a 404 / 405 by
-     falling back to a PATCH attempt, similar to how unadopt_camera
-     defends against unknown method routing.
+The {id} is a user-defined string ("alarmTriggerId"). To make it fire,
+the user must create an Alarm Manager rule in Protect's UI with the
+matching webhook ID. The body is empty — Protect doesn't propagate any
+payload metadata to downstream rule actions, so we encode the
+(camera, event-kind) discriminator into the ID itself.
 
-  2. **Alarm Manager custom-webhook trigger**
-     A URL the user configures inside Protect's Alarm Manager that,
-     when called, fires an automation rule (notification, clip
-     extension, downstream webhook, etc.). Per-event metadata can
-     be passed in the query string or body, depending on how the
-     trigger was configured. This is what drives mobile push
-     notifications.
+Default ID convention:
 
-Status: SKELETON — both surfaces are stubbed. The bookmark POST is
-the higher-confidence path; we'll wire that first once the endpoint
-shape is verified.
+    onvif-bridge:<camera_protect_id>:<kind>
+
+The user creates one alarm rule per (camera, kind) they care about,
+each with a webhook ID matching that pattern. They can also set
+`alarms.webhook_id_template` in config to customise (e.g. a single
+shared ID for "any event" or vendor-specific naming).
+
+Bookmark POSTs were considered as a second surface (timeline markers)
+but no public-documented endpoint exists in Protect 7.x. hjdhjd's
+TS library and uilibs/uiprotect both lack bookmark creation, and the
+official OpenAPI spec for Protect 7 has no bookmark path. Until
+someone captures DevTools traffic of "Add Bookmark" in the UI on a
+live controller, bookmarks are out of scope.
+
+Reference for the alarm webhook endpoint:
+    https://github.com/beezly/unifi-apis/blob/main/unifi-protect/7.0.107.json
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,112 +47,154 @@ from onvif_bridge.onvif_subscriber import OnvifEvent
 
 logger = logging.getLogger("onvif_bridge.pusher")
 
+# Default webhook ID template. Substitutions: {protect_id}, {kind}, {name}.
+DEFAULT_WEBHOOK_ID_TEMPLATE = "onvif-bridge:{protect_id}:{kind}"
+
 
 @dataclass
 class PushOutcome:
     ok: bool
-    method: str           # "bookmark" | "alarm_webhook" | "skipped"
+    method: str = "alarm_webhook"
+    status: int = 0
     message: str = ""
+    webhook_id: str = ""
+
+
+@dataclass
+class PusherStats:
+    """Lightweight rolling counters for the Status dashboard."""
+    pushes_ok: int = 0
+    pushes_failed: int = 0
+    last_outcome: Optional[PushOutcome] = None
+    last_outcome_epoch: float = 0.0
+    last_event: Optional[OnvifEvent] = None
+    last_event_epoch: float = 0.0
 
 
 class ProtectPusher:
-    """Stateless push helper.
+    """Fires Protect Alarm Manager webhook triggers via the integration API.
 
-    Holds a reference to a logged-in UniFiProtectClient (cookie + CSRF)
-    for the bookmark path, and a separate aiohttp session for posting
-    Alarm Manager webhook URLs (no auth — the URL itself is the secret).
+    Holds an aiohttp session for connection re-use. The integration
+    API requires X-API-KEY auth, which the user configures in
+    `unifi.api_key`. If no api_key is set, every push fails with a
+    clear error rather than silently dropping events.
     """
 
     def __init__(
         self,
-        client,                    # UniFiProtectClient (already logged in)
-        alarm_webhook_url: str = "",
+        host: str,
+        api_key: str,
+        webhook_id_template: str = DEFAULT_WEBHOOK_ID_TEMPLATE,
     ):
-        self._client = client
-        self._alarm_webhook_url = alarm_webhook_url
+        self._base = host if host.startswith("http") else f"https://{host}"
+        self._api_key = api_key
+        self._template = webhook_id_template or DEFAULT_WEBHOOK_ID_TEMPLATE
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._lock = asyncio.Lock()
+        self.stats = PusherStats()
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self._session is None:
+                connector = aiohttp.TCPConnector(ssl=False)
+                timeout = aiohttp.ClientTimeout(total=10)
+                self._session = aiohttp.ClientSession(
+                    connector=connector, timeout=timeout,
+                )
+
+    async def stop(self) -> None:
+        async with self._lock:
+            if self._session is not None:
+                await self._session.close()
+                self._session = None
+
+    # ── Push ───────────────────────────────────────────────────────────────
+
+    def _webhook_id(self, event: OnvifEvent) -> str:
+        try:
+            return self._template.format(
+                protect_id=event.camera_protect_id,
+                kind=event.kind,
+                name=event.camera_name,
+            )
+        except (KeyError, IndexError) as exc:
+            logger.warning("webhook_id_template error (%s) — falling back",
+                           exc)
+            return DEFAULT_WEBHOOK_ID_TEMPLATE.format(
+                protect_id=event.camera_protect_id, kind=event.kind,
+                name=event.camera_name,
+            )
 
     async def push(self, event: OnvifEvent) -> PushOutcome:
-        """Bridge one ONVIF event into Protect.
+        """Fire one Alarm Manager webhook trigger.
 
-        Strategy:
-          - Always attempt to write a bookmark on `is_active=True`
-            transitions (event START). Stop events are dropped — the
-            bookmark already marks the moment.
-          - If an alarm webhook URL is configured, fire it in parallel.
-
-        Both attempts are best-effort: a failure on one doesn't block
-        the other, and neither raises — the dashboard displays the
-        last outcome so the user can see what's flowing.
+        Skips event STOPs — they'd just double the trigger count for
+        no benefit (Alarm Manager rules already model "for X seconds
+        after trigger" so a single START is enough).
         """
+        self.stats.last_event = event
+        self.stats.last_event_epoch = time.time()
+
         if not event.is_active:
-            return PushOutcome(ok=True, method="skipped",
-                               message="event STOP — no bookmark")
+            outcome = PushOutcome(
+                ok=True, method="skipped",
+                message="event STOP — alarm trigger not re-fired",
+            )
+            self.stats.last_outcome = outcome
+            self.stats.last_outcome_epoch = time.time()
+            return outcome
 
-        # Bookmark — TODO: verify endpoint + payload shape
-        outcome = await self._write_bookmark(event)
+        if not self._api_key:
+            outcome = PushOutcome(
+                ok=False,
+                message=("no unifi.api_key set — Alarm Manager webhooks "
+                         "need an integration API key. Generate one in "
+                         "Protect → Settings → Control Plane → Integrations."),
+            )
+            self.stats.pushes_failed += 1
+            self.stats.last_outcome = outcome
+            self.stats.last_outcome_epoch = time.time()
+            return outcome
 
-        # Alarm Manager webhook — fire-and-forget, don't override
-        # the bookmark outcome unless the bookmark itself failed.
-        if self._alarm_webhook_url:
-            await self._fire_alarm_webhook(event)
+        webhook_id = self._webhook_id(event)
+        outcome = await self._fire(webhook_id)
+        outcome.webhook_id = webhook_id
 
+        if outcome.ok:
+            self.stats.pushes_ok += 1
+        else:
+            self.stats.pushes_failed += 1
+        self.stats.last_outcome = outcome
+        self.stats.last_outcome_epoch = time.time()
         return outcome
 
-    async def _write_bookmark(self, event: OnvifEvent) -> PushOutcome:
-        """POST a bookmark to the camera's timeline.
+    async def _fire(self, webhook_id: str) -> PushOutcome:
+        """POST to the alarm-manager webhook trigger.
 
-        Verified: the legacy `/proxy/protect/api/*` path uses cookie+CSRF
-        auth (UniFiProtectClient handles that). Unverified: exact route
-        and payload. Defensive try-list:
-
-          1. POST /proxy/protect/api/cameras/{id}/bookmarks
-                  body: {"name": ..., "time": <ms>, "color": "#..."}
-          2. POST /proxy/protect/api/bookmarks
-                  body: {"cameraId": ..., "name": ..., "time": <ms>}
-          3. PATCH /proxy/protect/api/cameras/{id}
-                  body: {"bookmarks": [<existing>, <new>]}
-
-        The 404/405 fall-through is the same defensive pattern we use
-        in unifi_auth.UniFiProtectClient.unadopt_camera.
-
-        Until verified, this is a stub that logs the intended call.
+        Protect responds:
+          204 No Content   — trigger fired (or rule with this id doesn't
+                             exist; Protect returns 204 either way to
+                             avoid leaking which IDs are configured).
+          400              — id missing / malformed
+          401 / 403        — bad / missing X-API-KEY
         """
-        logger.info(
-            "[stub] would write bookmark on %s (id=%s) at %s: %s/%s",
-            event.camera_name, event.camera_protect_id,
-            event.timestamp_epoch, event.kind, event.topic,
-        )
-        return PushOutcome(ok=True, method="bookmark",
-                           message="stub — verification pending")
+        await self.start()
+        assert self._session is not None  # for type narrowing
 
-    async def _fire_alarm_webhook(self, event: OnvifEvent) -> None:
-        """GET / POST the Alarm Manager custom-webhook URL.
+        # urlencode the id segment to handle any colon / slash chars.
+        from urllib.parse import quote
+        path = f"/proxy/protect/integration/v1/alarm-manager/webhook/{quote(webhook_id, safe='')}"
+        url = f"{self._base}{path}"
+        headers = {"X-API-Key": self._api_key}
 
-        Most "Custom Webhook" triggers in Protect 7.x just check that
-        the URL was hit; per-event metadata is usually passed via
-        query string (so it shows up in the Alarm Manager log even if
-        the trigger ignores it).
-
-        Until the trigger contract is verified: simple GET with
-        query params, no auth, short timeout, exceptions logged but
-        not raised.
-        """
-        params = {
-            "camera_id": event.camera_protect_id,
-            "camera_name": event.camera_name,
-            "kind": event.kind,
-            "topic": event.topic,
-        }
         try:
-            timeout = aiohttp.ClientTimeout(total=5)
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as s:
-                async with s.get(self._alarm_webhook_url, params=params) as r:
-                    if r.status >= 400:
-                        logger.warning(
-                            "Alarm webhook for %s returned HTTP %s",
-                            event.camera_name, r.status,
-                        )
+            async with self._session.post(url, headers=headers) as r:
+                if 200 <= r.status < 300:
+                    return PushOutcome(ok=True, status=r.status)
+                body = (await r.text())[:200]
+                return PushOutcome(ok=False, status=r.status,
+                                   message=f"HTTP {r.status}: {body}")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Alarm webhook call failed for %s: %s",
-                           event.camera_name, exc)
+            return PushOutcome(ok=False, message=f"request error: {exc}")

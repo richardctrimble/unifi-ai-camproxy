@@ -1,36 +1,23 @@
 """
-onvif_subscriber — per-camera ONVIF event subscription.
+onvif_subscriber — per-camera ONVIF event subscription via PullPoint.
 
-ONVIF Profile S devices expose events via WS-BaseNotification. There are
-two flavours:
+We use onvif-zeep (sync), wrapping blocking calls in asyncio.to_thread
+so the bridge stays responsive across many cameras. PullMessages is a
+long poll (we ask for PT30S), which without to_thread would block the
+event loop for the whole pull duration.
 
-  * BaseSubscription (push) — the device POSTs events to a callback URL
-    we provide. Reliable but requires a publicly reachable endpoint
-    from the camera to us.
-  * PullPointSubscription (pull) — we periodically PULL events from a
-    subscription endpoint the camera issues. Works in any topology
-    (camera doesn't need to reach back to us).
-
-We use **PullPoint** — simpler and works inside containers.
-
-Common topics worth bridging into Protect (vendor-dependent):
-
-  tns1:VideoSource/MotionAlarm                    — basic motion
-  tns1:RuleEngine/CellMotionDetector/Motion       — zoned motion
-  tns1:RuleEngine/MyRuleDetector/PeopleDetect     — Hikvision "person"
-  tns1:RuleEngine/MyRuleDetector/VehicleDetect    — Hikvision "vehicle"
-  tns1:RuleEngine/FieldDetector/ObjectsInside     — line crossing / zones
-  tns1:RuleEngine/LineDetector/Crossed            — virtual line crossing
-  tns1:AudioAnalytics/Audio/DetectedSound         — audio alarm
-
-Status: SKELETON — the contract and dataclasses are stable, the actual
-zeep / onvif-zeep subscription loop is the next milestone.
+Topic normalisation maps vendor-specific event topics to a small set of
+canonical kinds we know how to bridge into Protect. Anything unrecognised
+falls through to "unknown" and is still bridge-able as a generic motion
+bookmark — better to surface it noisily than silently drop a real
+detection.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
 
@@ -54,85 +41,187 @@ class CameraSubscription:
     """Live PullPoint subscription state for a single camera."""
     protect_id: str
     name: str
-    onvif_url: str
+    onvif_host: str
+    onvif_port: int
     username: str
     password: str
     last_event: Optional[OnvifEvent] = None
     last_pull_epoch: float = 0.0
     consecutive_failures: int = 0
+    is_connected: bool = False
+    last_error: str = ""
 
 
 # ── Topic → kind classification ────────────────────────────────────────────
 #
-# Vendor-agnostic mapping. Add entries here as new cameras come online.
-# Anything unmatched falls through to "unknown" which is still
-# bridge-able (as a generic motion bookmark).
+# Substring-match against a lowercased topic. First match wins. Order
+# matters — put more specific before more generic.
 
-_KIND_MAP: dict[str, str] = {
-    "motionalarm":          "motion",
-    "cellmotiondetector":   "motion",
-    "peopledetect":         "person",
-    "persondetect":         "person",
-    "objectdetector":       "person",   # some cameras emit generic "object"
-    "vehicledetect":        "vehicle",
-    "linedetector":         "line_crossing",
-    "linecross":            "line_crossing",
-    "fielddetector":        "line_crossing",   # zone-entry treated as line
-    "audioanalytics":       "audio",
-    "detectedsound":        "audio",
-}
+_KIND_RULES: list[tuple[str, str]] = [
+    ("peopledetect",       "person"),
+    ("persondetect",       "person"),
+    ("vehicledetect",      "vehicle"),
+    ("linedetector",       "line_crossing"),
+    ("linecross",          "line_crossing"),
+    ("fielddetector",      "line_crossing"),
+    ("objectsinside",      "line_crossing"),
+    ("audioanalytics",     "audio"),
+    ("detectedsound",      "audio"),
+    ("cellmotiondetector", "motion"),
+    ("motionalarm",        "motion"),
+    ("motiondetect",       "motion"),
+    # Generic ObjectDetector — many cameras use this for their on-board
+    # AI. Treat as person by default since that's the most common use.
+    ("objectdetector",     "person"),
+]
 
 
 def classify_topic(topic: str) -> str:
-    t = topic.lower()
-    for key, kind in _KIND_MAP.items():
-        if key in t:
+    t = (topic or "").lower()
+    for needle, kind in _KIND_RULES:
+        if needle in t:
             return kind
     return "unknown"
+
+
+# ── ONVIF event parsing ────────────────────────────────────────────────────
+
+
+def _parse_notification(msg) -> Optional[tuple[str, bool, dict]]:
+    """Extract (topic, is_active, props) from a NotificationMessage.
+
+    ONVIF messages nest the topic under msg.Topic._value_1 (zeep's name
+    for the XML element value) and the data under msg.Message._value_1.
+    The "is_active" boolean lives in a SimpleItem named IsMotion / Object
+    / State / similar — vendors are inconsistent. We pull every
+    SimpleItem into props and look for a true-ish value among the usual
+    keys.
+    """
+    try:
+        topic = ""
+        topic_elem = getattr(msg, "Topic", None)
+        if topic_elem is not None:
+            topic = getattr(topic_elem, "_value_1", "") or ""
+
+        props: dict = {}
+        active: Optional[bool] = None
+
+        message_elem = getattr(msg, "Message", None)
+        if message_elem is not None:
+            inner = getattr(message_elem, "_value_1", None)
+            data = getattr(inner, "Data", None) if inner is not None else None
+            simple_items = getattr(data, "SimpleItem", []) if data is not None else []
+            for item in simple_items or []:
+                name = getattr(item, "Name", "")
+                value = getattr(item, "Value", "")
+                if name:
+                    props[name] = value
+                # Active-state hints. Vendors vary widely.
+                if name in ("IsMotion", "State", "Active", "Detected", "Object"):
+                    s = str(value).lower()
+                    if s in ("true", "1", "active", "on", "yes"):
+                        active = True
+                    elif s in ("false", "0", "inactive", "off", "no"):
+                        active = False
+
+        # Fallback: if no explicit state, treat the message as a START.
+        if active is None:
+            active = True
+
+        return topic, active, props
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to parse ONVIF notification: %s", exc)
+        return None
 
 
 # ── Subscription loop ──────────────────────────────────────────────────────
 
 
+async def _build_camera(host: str, port: int, user: str, pwd: str):
+    """Build an ONVIFCamera off the event loop."""
+    from onvif import ONVIFCamera  # noqa: PLC0415 — keep import lazy
+    cam = await asyncio.to_thread(ONVIFCamera, host, port, user, pwd)
+    await asyncio.to_thread(cam.update_xaddrs)
+    return cam
+
+
 async def subscribe_camera(
     sub: CameraSubscription,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncIterator[OnvifEvent]:
     """Yield normalised events from one camera until cancelled.
 
-    Implementation outline (TODO):
-
-      1. Build an onvif-zeep ONVIFCamera client from sub.onvif_url +
-         credentials.
-      2. Get the EventService and call CreatePullPointSubscription with
-         a 10-min termination time.
-      3. Loop:
-           a. PullMessages(timeout=PT30S, MessageLimit=10).
-           b. For each NotificationMessage in the response, parse the
-              topic + SimpleItem properties, classify_topic(), build
-              an OnvifEvent, yield it.
-           c. Update sub.last_event / sub.last_pull_epoch.
-           d. On error: increment consecutive_failures; back off
-              exponentially up to ~60s; recreate subscription if
-              failures exceed a threshold.
-      4. On cancel: Unsubscribe() to release controller-side state.
-
-    Until step (1)/(2) is implemented this function is a stub that
-    yields nothing — the bridge starts up cleanly and the dashboard
-    will show "no events yet" instead of crashing.
+    On any error (connection refusal, expired subscription, parse
+    failure) we back off exponentially up to ~60 s and recreate the
+    PullPoint. This keeps a flaky camera from spamming Protect and
+    lets the dashboard show a clean "disconnected" state.
     """
-    logger.info(
-        "ONVIF subscription stubbed for %s (%s) — bridge skeleton phase",
-        sub.name, sub.onvif_url,
-    )
-    # Keep the coroutine alive so the bridge's gather() doesn't see
-    # a task that finished instantly. Cancellation propagates cleanly.
+    backoff = 5
     while True:
-        await asyncio.sleep(60)
-        sub.last_pull_epoch = asyncio.get_event_loop().time()
-    # Yield is unreachable today; once the real implementation lands
-    # the loop above will be replaced.
-    if False:  # pragma: no cover
-        yield OnvifEvent(  # type: ignore[unreachable]
-            camera_protect_id="", camera_name="", topic="", kind="",
-            is_active=False, timestamp_epoch=0.0,
-        )
+        if cancel_event is not None and cancel_event.is_set():
+            return
+
+        try:
+            cam = await _build_camera(sub.onvif_host, sub.onvif_port,
+                                      sub.username, sub.password)
+
+            events = cam.create_events_service()
+            # Ask for 10-min termination — we'll renew well before then
+            # by re-creating on errors, which is simpler than tracking
+            # SubscriptionReferences.
+            await asyncio.to_thread(
+                events.CreatePullPointSubscription,
+                {"InitialTerminationTime": "PT600S"},
+            )
+            pull = cam.create_pullpoint_service()
+
+            sub.is_connected = True
+            sub.consecutive_failures = 0
+            sub.last_error = ""
+            backoff = 5
+            logger.info("Subscribed to ONVIF events on %s (%s:%d)",
+                        sub.name, sub.onvif_host, sub.onvif_port)
+
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+
+                result = await asyncio.to_thread(
+                    pull.PullMessages,
+                    {"Timeout": "PT30S", "MessageLimit": 10},
+                )
+                sub.last_pull_epoch = time.time()
+                messages = getattr(result, "NotificationMessage", None) or []
+                for msg in messages:
+                    parsed = _parse_notification(msg)
+                    if parsed is None:
+                        continue
+                    topic, is_active, props = parsed
+                    event = OnvifEvent(
+                        camera_protect_id=sub.protect_id,
+                        camera_name=sub.name,
+                        topic=topic,
+                        kind=classify_topic(topic),
+                        is_active=is_active,
+                        timestamp_epoch=time.time(),
+                        raw_data=props,
+                    )
+                    sub.last_event = event
+                    yield event
+
+        except asyncio.CancelledError:
+            sub.is_connected = False
+            raise
+        except Exception as exc:  # noqa: BLE001
+            sub.is_connected = False
+            sub.consecutive_failures += 1
+            sub.last_error = str(exc)[:200]
+            logger.warning(
+                "ONVIF subscription error on %s (%s:%d): %s — retrying in %ds",
+                sub.name, sub.onvif_host, sub.onvif_port, exc, backoff,
+            )
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                return
+            backoff = min(backoff * 2, 60)

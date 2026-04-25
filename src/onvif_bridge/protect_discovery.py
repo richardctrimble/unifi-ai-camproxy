@@ -53,43 +53,43 @@ class DiscoveredCamera:
 
 
 def identify_onvif_camera(cam: dict) -> bool:
-    """Return True if a Protect /api/cameras entry looks like an ONVIF
+    """Return True if a Protect /api/cameras entry is an ONVIF
     third-party camera rather than a native UVC device.
 
-    OPEN QUESTION (verify against live Protect): the most likely fields
-    that flag an ONVIF adoption are:
+    Verified field (from hjdhjd/unifi-protect protect-types.ts and
+    uilibs/uiprotect devices.py): the legacy `/proxy/protect/api/cameras`
+    response carries `isThirdPartyCamera: boolean`. That's the
+    canonical discriminator.
 
-      cam.get("modelKey")  — "camera" for native, possibly something
-                             else for third-party
-      cam.get("type")      — usually contains "ONVIF" or the third-party
-                             vendor's name for non-UVC adoptions
-      cam.get("isThirdPartyCamera")  — speculative, may exist on 7.x
-      cam.get("featureFlags")        — often differs significantly
+    `isAdoptedByOther` and `marketName` are secondary corroborating
+    fields. `modelKey` is always "camera" for both natives and
+    third-party — it does NOT discriminate.
 
-    Until we've confirmed the exact field, the heuristic below errs on
-    the side of including a camera (return True) rather than excluding
-    it. The discovery UI will let the user untick anything that's a
-    false positive.
+    Note: the integration API (`/proxy/protect/integration/v1/cameras`)
+    exposes a minimal schema that does NOT include
+    `isThirdPartyCamera`, so discovery must use the legacy endpoint
+    (cookie + CSRF auth, which UniFiProtectClient handles).
     """
     if not isinstance(cam, dict):
         return False
 
-    # Native UVC cameras have a "UVC ..." type string. If we see that,
-    # it's almost certainly a Ubiquiti camera and not ONVIF.
-    type_str = (cam.get("type") or cam.get("displayName") or "").lower()
+    # Primary: explicit boolean
+    if "isThirdPartyCamera" in cam:
+        return bool(cam["isThirdPartyCamera"])
+
+    # Older Protect builds may not expose the flag — fall back to
+    # type-string heuristic. Native UVC cameras have a "UVC ..." type
+    # string; third-party cameras typically don't.
+    type_str = (cam.get("type") or cam.get("marketName")
+                or cam.get("displayName") or "").lower()
     if type_str.startswith("uvc "):
         return False
-
-    # Hard signal — explicit flag if present
-    if cam.get("isThirdPartyCamera"):
-        return True
-
-    # Heuristic — generic / ONVIF type strings
     if any(k in type_str for k in ("onvif", "third party", "thirdparty", "rtsp")):
         return True
 
-    # Fallback — if the camera has a host/IP and isn't UVC, treat it as
-    # a candidate. The user can deselect false positives.
+    # Last resort — include if it has a host and isn't obviously UVC.
+    # False positives are unticked by the user; false negatives are
+    # silent failures, which is the worse mode.
     return bool(cam.get("host"))
 
 
