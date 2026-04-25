@@ -2,11 +2,24 @@
 
 [![Docker](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml)
 
-A DIY UniFi AI camera proxy — spoofs RTSP cameras into UniFi Protect and
-injects real-time person / vehicle detections and virtual line crossing
-events driven by your own YOLOv8 inference.
+A DIY UniFi camera AI tooling. Two modes ship side by side:
 
-## How it works
+- **ONVIF bridge** *(`:latest`, primary, lightweight ~150 MB)* — your
+  cameras are adopted natively in Protect; we subscribe to their ONVIF
+  event streams and bridge person/vehicle/motion/line-crossing events
+  into Protect's timeline as bookmarks + Alarm Manager triggers. No
+  spoofing, no transcoding, native H.265.
+- **Full mode** *(`:full`, heavier ~2.5 GB)* — spoofs an RTSP camera as
+  a UniFi camera in Protect and runs YOLOv8 inference locally
+  (CPU/Intel/CUDA). Useful when your cameras don't have onboard AI.
+
+> **Status**: ONVIF bridge is in **preparation phase** — the skeleton
+> runs and the discovery helper is wired, but ONVIF subscription and
+> the Protect-side bookmark/alarm POSTs are still being verified.
+> The full mode is the working flow today; pull `:full` (or pin a
+> calver tag) until the bridge is production-ready.
+
+## How it works (full mode, today)
 
 ```
 RTSP camera → YOLOv8 inference → UniFi WebSocket protocol → Protect
@@ -14,103 +27,116 @@ RTSP camera → YOLOv8 inference → UniFi WebSocket protocol → Protect
 
 Each entry under `cameras:` becomes an independent adopted camera in
 Protect with smart-detect events, bounding boxes, thumbnails and
-timeline entries driven from our AI pipeline.
+timeline entries driven by our AI pipeline.
+
+## How it will work (ONVIF bridge, target)
+
+```
+ONVIF camera → adopted natively in Protect (video, H.265 native)
+            ↓
+            ONVIF event subscription (motion / person / vehicle / line)
+            ↓
+        unifi-ai-camproxy bridge
+            ↓
+        Protect bookmarks + Alarm Manager webhooks
+```
+
+No video transit through the bridge, no GPU on our side. Camera's own
+onboard AI does the heavy lifting; we translate its events into
+something Protect's UI surfaces.
 
 ## Prerequisites
 
-- Docker + Compose v2 on an x86 Linux host
-- UniFi Protect running on a UDM / UDM Pro / UNVR
-- At least one RTSP camera on the LAN
-- A **UniFi OS** user with Protect admin rights (local Protect-app-only
-  accounts do not work)
+- Docker + Compose v2 on a Linux host
+- UniFi Protect on a UDM / UDM Pro / UNVR
+- A **UniFi OS** user with Protect admin rights
+- For full mode: at least one RTSP camera on the LAN
+- For bridge mode: cameras adopted to Protect via ONVIF
 
-## Quick start
+## Quick start (full mode — works today)
 
 ```bash
 git clone https://github.com/richardctrimble/unifi-ai-camproxy.git
 cd unifi-ai-camproxy
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
 ```
 
 Open `http://<docker-host>:8091/` and:
 
-1. **UniFi** tab — enter host + username + password, click
-   *Test username + password*, then *Save to config.yml*.
-2. **Setup** tab — click *+ Add Camera*, enter an RTSP URL, *Save All*.
-3. Restart the container (`docker compose restart` or the *Restart
-   Container* button on the Status tab).
+1. **UniFi** tab — enter host + username + password, click *Test*, *Save*.
+2. **Setup** tab — *+ Add Camera*, paste an RTSP URL, *Save All*.
+3. Restart the container.
 
-The camera auto-adopts into Protect. If a pending record is stuck with
-a bad IP, the UniFi tab's *Cameras in Protect* panel can remove it —
-Protect 7.x's own UI no longer offers a Forget action for pending
-cameras.
+The camera auto-adopts. If a pending record gets stuck with a bad IP,
+the UniFi tab's *Cameras in Protect* panel can remove it.
+
+## Quick start (ONVIF bridge — preparation phase)
+
+```bash
+docker compose up -d --build
+```
+
+This builds the `:latest` image. Today it boots, exposes a stub
+dashboard, and idles — useful only for previewing the architecture.
+For actual functionality, use full mode above.
 
 ## Images
 
-| Tag | Size | Covers |
-|---|---|---|
-| `unifi-ai-camproxy:latest` | ~2.5 GB | CPU, Intel iGPU/dGPU/NPU, Apple MPS |
-| `unifi-ai-camproxy:cuda` | ~3 GB | NVIDIA CUDA + CPU fallback |
+| Tag | Built by | Size | Use |
+|---|---|---|---|
+| `:latest` | `Dockerfile` | ~150 MB | ONVIF bridge (primary, in preparation) |
+| `:full` | `Dockerfile.full` | ~2.5 GB | Full spoof+inference: CPU + Intel OpenVINO |
+| `:full-cuda` | `Dockerfile.full-cuda` | ~3 GB | Full + NVIDIA CUDA (opt-in CI build) |
 
-Build manually:
+Calver tags get matching variants:
+`:2026.4.14`, `:2026.4.14-full`, `:2026.4.14-full-cuda`.
 
-```bash
-docker build -t unifi-ai-camproxy:latest .
-docker build -f Dockerfile.cuda -t unifi-ai-camproxy:cuda .
-```
+## Hardware acceleration (full mode only)
 
-## Hardware acceleration
+Inference device is per-camera. Set it in the Setup tab or leave as
+`auto` (probes in order: `cuda` → `intel:gpu` → `intel:npu` → `mps` →
+`cpu`).
 
-Inference device is per-camera — a host with both an Intel iGPU and an
-NVIDIA card can run each camera on a different backend. Set it in the
-Setup tab or leave as `auto` (probes in order: `cuda` → `intel:gpu` →
-`intel:npu` → `mps` → `cpu`). The Status tab shows which backends this
-image can reach and which one each camera is actually running on.
-
-**Intel iGPU / dGPU / NPU** (default image, OpenVINO):
+**Intel iGPU / dGPU / NPU**:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+docker compose -f docker-compose.yml \
+  -f docker-compose.full.yml \
+  -f docker-compose.intel.yml up -d
 ```
 
-Host needs `/dev/dri` passed through and your user in the `render`
-group (`sudo usermod -aG render $USER && newgrp render`).
+Host needs `/dev/dri` and your user in the `render` group.
 
 **NVIDIA CUDA** (requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+docker compose -f docker-compose.yml \
+  -f docker-compose.full.yml \
+  -f docker-compose.gpu.yml up -d --build
 ```
 
-On first run YOLOv8 exports to OpenVINO IR (~30 s) and caches under
-`./config/yolov8n_openvino_model/` so subsequent starts are instant.
+The bridge mode has no GPU dependency — that's the point.
 
-## Web UI
+## Web UI (full mode)
 
 Five tabs at `http://<docker-host>:8091/`:
 
 - **Status** — live health: per-camera state, inference device, frame
   counters, detection totals, auth lockout / token refresh stats,
-  disk/memory/heartbeat, advertised LAN IP (amber if loopback — a trap
-  Protect caches forever).
+  disk/memory/heartbeat, advertised LAN IP.
 - **UniFi** — credentials with per-type Test buttons, plus a *Cameras
   in Protect* panel that lists everything the controller knows about
   and can remove stuck pending adoptions.
 - **Setup** — add/edit cameras. Per-camera knobs: RTSP URL + transport,
-  Protect model (AI variants by default), AI device + model,
-  confidence thresholds, frame skip, include-audio toggle, H.265 →
-  H.264 transcode toggle.
+  Protect model, AI device + model, confidence thresholds, frame skip,
+  include-audio toggle, H.265 → H.264 transcode toggle.
 - **Lines** — click two points on a live frame to draw a virtual
-  crossing line. Saves to `config.yml`; restart to apply.
-- **Logs** — tails `/config/camproxy.log` with password redaction,
-  optional auto-refresh.
-
-All edits write to `config/config.yml`. Most changes need a container
-restart; the UI says so.
+  crossing line.
+- **Logs** — tails `/config/camproxy.log` with password redaction.
 
 ## Configuration reference
 
-Minimum `config/config.yml`:
+Minimum `config/config.yml` for full mode:
 
 ```yaml
 unifi:
@@ -123,75 +149,53 @@ cameras:
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
 ```
 
-Everything else has sensible defaults. The web UI is the canonical
-editor for per-camera knobs. See `config/config.example.yml` for a
-fully-commented template covering every option.
+Bridge mode config schema is still being finalised — see
+`SECONDBRAIN.md`.
 
 ## Troubleshooting
 
 Most problems surface clearly in the **Logs** tab.
 
-**Camera stuck pending / "An error occurred" on Adopt**
-Protect cached the wrong IP (commonly `127.0.0.1` from an early
-adoption attempt before network was ready). UniFi tab → *Cameras in
-Protect* → Refresh → **Remove** the stuck entry → restart.
+**Camera stuck pending / "An error occurred" on Adopt** *(full mode)*
+Protect cached a bad IP from an early adoption attempt. UniFi tab →
+*Cameras in Protect* → Refresh → **Remove** the stuck entry → restart.
 
-**Video is black in Protect**
-Source is probably H.265 — Protect only accepts H.264 from spoofed
-cameras. Setup tab → check *Transcode to H.264* for that camera. If
-you enabled *Include audio* and the source has none, uncheck it
-(ffmpeg fails silently when the AAC encoder has no input).
+**Video is black in Protect** *(full mode)*
+Source is probably H.265 — Setup → *Transcode to H.264*. If you
+enabled *Include audio* and the source has none, uncheck it.
 
 **UniFi login rejected / rate-limited**
 Must be a **UniFi OS** user, not a Protect-app-only account. Use the
 UniFi tab's *Test username + password* button. After repeated failures
-the app backs off token refresh for 10–15 min to avoid a hard Protect
-lockout; saving new creds clears that cooldown immediately.
-
-**Inference device shows as `cpu` when you expected GPU**
-Status tab → *Available backends*. Any ✗ grey entry means the
-host-side passthrough isn't wired up (Intel `/dev/dri` missing, or
-NVIDIA runtime not installed).
-
-**Detections not showing on Protect's timeline**
-Smart-detect is gated by the camera model string. Default is
-`UVC AI Pro`; if you switched to a non-AI model (e.g. `UVC G4 Pro`),
-Protect silently drops our events. Setup tab → *Protect model*.
+the app backs off for 10–15 min; saving new creds clears the cooldown.
 
 ## TrueNAS Scale
 
-A ready-to-paste compose file lives at `truenas/docker-compose.yaml`:
-
-1. TrueNAS 24.10+ (Electric Eel) → **Apps** → **Discover Apps** →
-   **Custom App** → **Install via YAML**.
-2. Paste the compose file; edit the four `CHANGE ME` lines (dataset
-   path, `UNIFI_HOST`, username, password).
-3. Optionally uncomment the Intel GPU or NVIDIA GPU block at the bottom.
-4. Save. Container starts in web-only mode.
-5. Open `http://<truenas-ip>:8091/` → Setup → add cameras → restart
-   the app from TrueNAS.
+`truenas/docker-compose.yaml` has a paste-in template. Today it pulls
+`:latest` (the bridge stub). **For working AI today, edit the image
+line to `:full` (or a `:YYYY.M.R-full` tag) until the bridge ships.**
 
 ## Versioning
 
 Calendar versioning `YYYY.M.R` (e.g. `2026.4.14`). Pushing a tag
-triggers CI to publish `:<tag>` and `:<tag>-cuda` images to GHCR.
-`:latest` tracks `main` HEAD.
+triggers CI to publish `:<tag>`, `:<tag>-full`, and (opt-in)
+`:<tag>-full-cuda` images to GHCR.
 
 ## Known limitations
 
-- Smart-detect injection can break across Protect firmware updates —
-  the protocol is reverse-engineered and a moving target. See
-  `SECONDBRAIN.md` for the current landscape and what's worth watching.
-- Line crossings appear as person / vehicle detections; Protect has no
+- ONVIF bridge mode is in preparation — see SECONDBRAIN.md for the
+  open verification questions and roadmap.
+- Full mode's smart-detect injection can break across Protect firmware
+  updates. The protocol is reverse-engineered and a moving target —
+  this is the main reason for the bridge pivot.
+- Line crossings appear as person/vehicle detections; Protect has no
   separate "line crossing" event type.
 - Facial recognition and LPR are not implemented — those require
   Ubiquiti's closed AI Key pipeline.
-- H.265 sources need transcoding (CPU cost). No public reversing of
-  the modern protocol that natively accepts H.265.
 
 ## Credits
 
-Protocol implementation built on
+Full-mode protocol implementation built on
 [unifi-cam-proxy](https://github.com/keshavdv/unifi-cam-proxy) by
-keshavdv. Upstream is pinned to a reviewed commit in the Dockerfile —
-see `SECONDBRAIN.md` for the pin rationale and upstream PRs to watch.
+keshavdv. Upstream is pinned in `Dockerfile.full` — see
+`SECONDBRAIN.md` for the pin rationale.

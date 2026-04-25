@@ -1,9 +1,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Intel iGPU / dGPU / NPU override — apply on top of docker-compose.yml:
+# Intel iGPU / dGPU / NPU override — only useful with the full
+# spoof+inference image. The default :latest base is now the lightweight
+# ONVIF bridge which doesn't run any local AI, so iGPU passthrough has
+# no effect there. Layer this on top of the full compose:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.full.yml \
+#     -f docker-compose.intel.yml \
+#     up -d
 #
-# Note: no --build needed — the default image already ships OpenVINO +
+# Note: no --build needed — the full image already ships OpenVINO +
 # the Intel compute runtime. This override just passes through /dev/dri
 # so OpenVINO can actually reach the GPU / NPU.
 #
@@ -21,7 +28,7 @@
 #      the container can open /dev/dri/renderD128. `sudo usermod -aG render $USER`
 #      followed by a re-login usually sorts this.
 #
-# What this changes vs plain `docker compose up`:
+# What this changes vs the bare full image:
 #   - /dev/dri is bind-mounted into the container so OpenVINO can reach
 #     the iGPU / dGPU via Level Zero.
 #   - group_add: video + render so the container process has permission

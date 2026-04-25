@@ -530,5 +530,115 @@ Calendar versioning `YYYY.M.R`:
 - `R` release number within that month (1, 2, 3…)
 
 Tags: `2026.4.1`, `2026.4.14`, `2026.5.1`. Pushing a tag triggers
-the CI workflow to build and publish both `:<tag>` and
-`:<tag>-cuda` images to GHCR. `:latest` tracks `main` HEAD.
+the CI workflow to build and publish three image variants per tag:
+- `:<tag>` — ONVIF bridge (primary)
+- `:<tag>-full` — full spoof+inference (CPU + Intel)
+- `:<tag>-full-cuda` — full + CUDA (opt-in build)
+
+`:latest` tracks main's ONVIF bridge build; `:full` and `:full-cuda`
+track the corresponding full-mode builds.
+
+---
+
+## ONVIF bridge mode (architectural pivot, Apr 2026)
+
+### Why the pivot
+
+The legacy spoof+inference path has three structural weaknesses we
+keep paying for:
+
+1. The AVClient protocol is brittle across Protect firmware bumps
+   (Protect 7.x's extendedFLV/Opus change is the latest example;
+   issue keshavdv #416).
+2. We have to push video through ourselves, which means ffmpeg +
+   transcoding for H.265 sources + a ~2.5 GB image.
+3. Local YOLO inference is duplicative — modern ONVIF cameras
+   (Hikvision, Dahua, Reolink, Amcrest) emit person/vehicle/line
+   events from their own onboard AI for free.
+
+The bridge mode avoids all three: cameras adopt natively in Protect
+(Protect handles video, including H.265), and we just translate
+their ONVIF events into something Protect's UI surfaces.
+
+### Architecture
+
+```
+ONVIF camera → adopted natively in Protect (Protect owns the video)
+            ↓
+            ONVIF event subscription (PullPoint, BaseNotification)
+            ↓
+        unifi-ai-camproxy bridge container
+            ↓
+        Protect /api/cameras/{id}/bookmarks  (timeline marker)
+        Protect Alarm Manager custom webhook (notifications)
+```
+
+No video transit, no inference, ~150 MB image. All Python: aiohttp +
+onvif-zeep.
+
+### Module layout
+
+`src/onvif_bridge/`:
+
+- `protect_discovery.py` — wraps `unifi_auth.UniFiProtectClient.list_cameras()`
+  and filters for ONVIF-adopted cameras.
+- `onvif_subscriber.py` — per-camera PullPoint subscription, normalises
+  vendor topics into `kind ∈ {motion, person, vehicle, line_crossing,
+  audio, unknown}`.
+- `protect_pusher.py` — POST bookmarks + fire Alarm Manager webhooks.
+- `web_tool.py` — minimal Status dashboard (skeleton today).
+- `main.py` — entrypoint wiring all of the above.
+
+`unifi_auth.py` is shared with the full image (one auth implementation,
+two consumers). The bridge image's Dockerfile copies it alongside the
+bridge package.
+
+### Open verification questions (must answer before functional)
+
+These are the unknowns that block real implementation. Each is a
+short live-Protect spike to resolve.
+
+1. **Bookmark endpoint shape** — exact path and payload for
+   `POST /proxy/protect/api/cameras/{id}/bookmarks`. Candidates:
+   ```
+   POST /proxy/protect/api/cameras/{id}/bookmarks
+        body: {"name": ..., "time": <ms>, "color": "#..."}
+   POST /proxy/protect/api/bookmarks
+        body: {"cameraId": ..., "name": ..., "time": <ms>}
+   PATCH /proxy/protect/api/cameras/{id}
+        body: {"bookmarks": [<existing>, <new>]}
+   ```
+   The pusher tries them in order with 404/405 fall-through (same
+   defensive pattern as `unadopt_camera`). Need to verify which works
+   on Protect 7.x and what fields the UI actually displays.
+
+2. **Alarm Manager custom-webhook trigger** — does the inbound URL
+   accept per-call metadata (camera ID, event type) via query string
+   or POST body? Or is it just a binary "was hit" trigger? Affects
+   whether one webhook serves all cameras or we need one per camera.
+
+3. **ONVIF camera identification in Protect's API** — which field
+   distinguishes a third-party ONVIF adoption from a native UVC one?
+   Candidates documented in `protect_discovery.identify_onvif_camera`:
+   `modelKey`, `type`/`displayName`, `isThirdPartyCamera`. Until
+   verified the helper errs on inclusion (false positives are
+   unticked in the UI, false negatives are a worse failure mode).
+
+### Status flags (image variant detection)
+
+Each image sets `APP_IMAGE_VARIANT` so the Status tab can label
+itself. Values: `onvif` (bridge) or `full` (spoof+inference).
+`build_info.py` already surfaces this via `get_build_info()`.
+
+### Coexistence policy
+
+Both images live indefinitely in the same GHCR package, distinguished
+by tag (`:latest` = bridge, `:full` = spoof+inference). No removal
+is planned for the full image — it's the only path for users with
+cameras that lack onboard AI, and it's the fallback if Protect ever
+breaks the bridge's APIs.
+
+The `src/` directory keeps the legacy `main.py` / `unifi_client.py`
+/ `ai_engine.py` / `web_tool.py` untouched; the bridge lives in
+`src/onvif_bridge/` so the two are clearly separated and either
+can evolve without the other.

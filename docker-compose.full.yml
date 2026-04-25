@@ -1,0 +1,20 @@
+version: "3.8"
+
+# Layer this on top of docker-compose.yml to switch from the
+# lightweight ONVIF bridge (default :latest) to the full spoof+inference
+# image (:full).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+#
+# The full image (~2.5 GB) ships CPU PyTorch + OpenVINO + the Intel
+# compute runtime, so AIEngine auto-detects the fastest reachable
+# device on startup. For NVIDIA CUDA, layer docker-compose.gpu.yml
+# on top of this. For Intel iGPU /dev/dri passthrough, layer
+# docker-compose.intel.yml on top.
+
+services:
+  unifi-ai-camproxy:
+    build:
+      dockerfile: Dockerfile.full
+    image: unifi-ai-camproxy:full
+    entrypoint: ["python", "/app/docker-entrypoint.py"]
