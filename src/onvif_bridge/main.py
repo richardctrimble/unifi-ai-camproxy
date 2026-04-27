@@ -316,6 +316,9 @@ async def main() -> None:
                 "pusher_stats": pusher.stats,
                 "last_discovery_error": last_discovery_error,
                 "last_discovery_epoch": last_discovery_epoch,
+                # Surfaced to the Setup tab so it can render the exact
+                # webhook IDs the bridge will fire.
+                "webhook_id_template": pusher.webhook_id_template,
             }
             web = BridgeWebTool(cfg, state_provider)
             logger.info("Starting bridge web UI on port %d", port)

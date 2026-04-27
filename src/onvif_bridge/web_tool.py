@@ -1,9 +1,17 @@
 """
-web_tool — minimal aiohttp UI for the ONVIF bridge.
+web_tool — aiohttp UI for the ONVIF bridge.
 
-Two tabs today: **Status** and **Logs**. Setup will follow once we
-decide whether to drive ONVIF creds from env vars (TrueNAS-style) or
-to ship a per-camera form here.
+Three tabs:
+
+  * **Status** — discovered cameras, per-camera subscription state,
+    last event, push counters.
+  * **Setup**  — per-(camera, kind) webhook IDs with copy buttons
+    and live "is this rule firing?" indicators. Walks the user
+    through creating Alarm Manager rules in Protect — the only
+    piece of the flow that has to be done manually because Protect's
+    integration API doesn't expose alarm-rule CRUD.
+  * **Logs**   — tail of /config/camproxy.log with RTSP password
+    redaction.
 
 The UI deliberately mirrors the full image's dashboard layout (same
 port 8091, dark theme, status-grid styling) so users moving between
@@ -26,12 +34,21 @@ from build_info import get_build_info
 logger = logging.getLogger("onvif_bridge.web")
 
 
+# Kinds we emit from onvif_subscriber.classify_topic. The Setup tab
+# enumerates a row per (camera, kind) so the user knows every webhook
+# id the bridge might fire — even if their camera doesn't currently
+# emit one (e.g. a camera with no AI emits only `motion`, but a rule
+# for `:person` is harmless to leave configured for later upgrades).
+SUPPORTED_KINDS = ["person", "vehicle", "line_crossing", "motion", "audio"]
+
+
 _INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>unifi-ai-camproxy / ONVIF bridge</title>
 <style>
  * { box-sizing: border-box; }
  body { font-family: -apple-system, system-ui, sans-serif; background:#1a1a1a; color:#ddd; margin:0; padding:18px; max-width:1100px; }
  h1 { font-size:18px; margin:0 0 12px; }
+ h4 { margin:14px 0 6px; font-size:13px; color:#bbb; }
  .tabs { display:flex; gap:6px; margin-bottom:14px; border-bottom:1px solid #333; }
  .tab { background:none; border:0; color:#888; padding:8px 14px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; }
  .tab.active { color:#ddd; border-bottom-color:#3b82f6; }
@@ -55,13 +72,23 @@ _INDEX_HTML = """<!doctype html>
  .pill.kind-motion { background:#333; color:#bbb; }
  .pill.kind-audio { background:#3b1e5f; color:#c8a; }
  code { background:#111; padding:1px 5px; border-radius:3px; font-size:12px; }
+ .copy-row { display:flex; gap:6px; align-items:center; }
+ .copy-row code { flex:1; padding:4px 8px; font-size:12px; overflow-x:auto; white-space:nowrap; }
+ .copy-btn { background:#333; border:0; color:#ddd; padding:4px 10px; border-radius:3px; cursor:pointer; font-size:12px; }
+ .copy-btn:hover { background:#444; }
+ .copy-btn.copied { background:#0d3b2c; color:#6f6; }
+ ol.steps { margin:0; padding-left:22px; line-height:1.55; font-size:13px; }
+ ol.steps li { margin-bottom:6px; }
  .cam-row { display:grid; grid-template-columns:2fr 1.4fr 1fr 1fr 1fr 1.2fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; }
  .cam-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
+ .setup-row { display:grid; grid-template-columns:1.4fr 1fr 2.6fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; }
+ .setup-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
  pre#log-output { background:#111; border:1px solid #333; border-radius:4px; padding:10px; max-height:65vh; overflow:auto; font-size:12px; line-height:1.4; white-space:pre-wrap; word-break:break-all; margin:0; }
 </style></head><body>
 <h1>unifi-ai-camproxy / ONVIF bridge</h1>
 <div class="tabs">
   <button class="tab active" data-pane="status">Status</button>
+  <button class="tab" data-pane="setup">Setup</button>
   <button class="tab" data-pane="logs">Logs</button>
 </div>
 
@@ -77,6 +104,35 @@ _INDEX_HTML = """<!doctype html>
   <div class="card">
     <div class="card-header"><h3>Push activity</h3></div>
     <div class="grid" id="push-grid"></div>
+  </div>
+</div>
+
+<div id="setup" class="pane">
+  <div class="card">
+    <div class="card-header"><h3>Configure Protect Alarm Manager rules</h3></div>
+    <div style="font-size:13px;color:#bbb;margin-bottom:10px;">
+      Protect's integration API doesn't expose alarm-rule CRUD, so each rule has to be created in the
+      Protect UI. The bridge will fire the webhook IDs listed below; create one matching alarm rule
+      per row you care about. Active template:
+      <code id="setup-template">—</code>.
+    </div>
+    <h4>One-time setup, per row you want</h4>
+    <ol class="steps">
+      <li>Open <strong>UniFi Protect</strong> → <strong>Alarm Manager</strong> → <strong>Create Alarm</strong>.</li>
+      <li>Set the trigger to <strong>Custom Webhook</strong>.</li>
+      <li>Paste the row's webhook ID (use the Copy button →) into the <em>Trigger ID</em> field.</li>
+      <li>Configure downstream actions: push notification, recording extension, send to a webhook, etc.</li>
+      <li>Save. The status column below flips to <span class="ok">firing</span> the next time the bridge sends an event of that kind.</li>
+    </ol>
+    <p style="font-size:12px;color:#888;margin:10px 0 0;">
+      You only need rules for kinds your cameras actually emit — but unconfigured rows do no harm,
+      they're just no-ops. Setup template can be changed via <code>alarms.webhook_id_template</code>
+      in <code>config.yml</code>.
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-header"><h3>Webhook IDs</h3></div>
+    <div id="setup-table"><span class="empty">Waiting for camera discovery…</span></div>
   </div>
 </div>
 
@@ -110,6 +166,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   t.classList.add('active');
   document.getElementById(t.dataset.pane).classList.add('active');
   if (t.dataset.pane === 'logs') refreshLogs();
+  if (t.dataset.pane === 'setup') refreshSetup();
 }));
 
 async function refreshStatus(){
@@ -161,6 +218,57 @@ async function refreshStatus(){
   } catch (e) { /* ignore */ }
 }
 
+async function refreshSetup(){
+  try {
+    const data = await (await fetch('/api/setup')).json();
+    document.getElementById('setup-template').textContent = data.webhook_id_template || '—';
+    var rows = data.rows || [];
+    var el = document.getElementById('setup-table');
+    if (!rows.length) {
+      el.innerHTML = '<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';
+      return;
+    }
+    var html = '<div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
+    rows.forEach(function(r){
+      var status, statusCls;
+      if (r.fires_ok > 0) {
+        status = 'firing — last ' + fmtAgo(r.last_fire_epoch) + ' (' + r.fires_ok + ' total)';
+        statusCls = 'ok';
+      } else if (r.fires_failed > 0) {
+        status = 'failing — HTTP ' + (r.last_status || '?') + ' (' + r.fires_failed + ' failures)';
+        statusCls = 'err';
+      } else {
+        status = 'not yet fired';
+        statusCls = 'label';
+      }
+      html += '<div class="setup-row">'+
+        '<span>'+esc(r.camera_name)+'</span>'+
+        '<span><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span>'+
+        '<span class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span>'+
+        '<span class="'+statusCls+'">'+esc(status)+'</span>'+
+      '</div>';
+    });
+    el.innerHTML = html;
+    el.querySelectorAll('.copy-btn').forEach(function(b){
+      b.addEventListener('click', async function(){
+        try {
+          await navigator.clipboard.writeText(b.dataset.copy);
+          b.classList.add('copied');
+          var prev = b.textContent;
+          b.textContent = 'Copied!';
+          setTimeout(function(){ b.classList.remove('copied'); b.textContent = prev; }, 1200);
+        } catch (e) {
+          // Fallback: select the code text so user can ctrl-c
+          var range = document.createRange();
+          range.selectNode(b.previousElementSibling);
+          window.getSelection().removeAllRanges();
+          window.getSelection().addRange(range);
+        }
+      });
+    });
+  } catch (e) { /* ignore */ }
+}
+
 async function refreshLogs(){
   var lines = document.getElementById('log-lines').value;
   try {
@@ -181,15 +289,32 @@ document.getElementById('log-auto').addEventListener('change', function(e){
 
 refreshStatus();
 setInterval(refreshStatus, 3000);
+// Setup tab refreshes on demand and every 5s while it's the visible pane
+setInterval(function(){
+  if (document.querySelector('[data-pane="setup"].active')) refreshSetup();
+}, 5000);
 </script></body></html>
 """
 
 # RTSP password redaction in log lines (mirrors the full image's behaviour).
 _RTSP_PWD_RE = re.compile(r"(rtsp://[^:]+:)([^@]+)(@)")
 
+DEFAULT_WEBHOOK_TEMPLATE = "onvif-bridge:{protect_id}:{kind}"
+
+
+def _format_webhook_id(template: str, protect_id: str, kind: str,
+                       name: str) -> str:
+    """Apply the user's template; fall back to the default on KeyError."""
+    try:
+        return template.format(protect_id=protect_id, kind=kind, name=name)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_WEBHOOK_TEMPLATE.format(
+            protect_id=protect_id, kind=kind, name=name,
+        )
+
 
 class BridgeWebTool:
-    """Lightweight web app — Status + Logs."""
+    """Lightweight web app — Status, Setup, Logs."""
 
     def __init__(self, config: dict,
                  state_provider: Callable[[], dict]):
@@ -199,6 +324,7 @@ class BridgeWebTool:
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/status", self._status)
+        self.app.router.add_get("/api/setup", self._setup)
         self.app.router.add_get("/api/logs", self._logs)
 
     async def _index(self, _: web.Request) -> web.Response:
@@ -255,6 +381,43 @@ class BridgeWebTool:
                 "last_discovery_error": state.get("last_discovery_error", ""),
                 "last_discovery_epoch": state.get("last_discovery_epoch", 0),
             },
+        })
+
+    async def _setup(self, _: web.Request) -> web.Response:
+        """Return the (camera × kind) → webhook-id table for the Setup tab.
+
+        Each row carries firing stats from the pusher so the user can
+        immediately see whether a configured Protect Alarm Manager rule
+        is actually being hit.
+        """
+        state = self._state_provider()
+        template = state.get("webhook_id_template") or DEFAULT_WEBHOOK_TEMPLATE
+        cams = state.get("discovered_cameras", []) or []
+        ps = state.get("pusher_stats")
+        wstats: dict = getattr(ps, "webhook_stats", {}) if ps is not None else {}
+
+        rows = []
+        for cam in cams:
+            protect_id = cam.get("protect_id", "")
+            name = cam.get("name", "")
+            for kind in SUPPORTED_KINDS:
+                wid = _format_webhook_id(template, protect_id, kind, name)
+                ws = wstats.get(wid)
+                rows.append({
+                    "camera_name": name,
+                    "camera_protect_id": protect_id,
+                    "kind": kind,
+                    "webhook_id": wid,
+                    "fires_ok": ws.fires_ok if ws else 0,
+                    "fires_failed": ws.fires_failed if ws else 0,
+                    "last_fire_epoch": ws.last_fire_epoch if ws else 0,
+                    "last_status": ws.last_status if ws else 0,
+                })
+
+        return web.json_response({
+            "webhook_id_template": template,
+            "supported_kinds": SUPPORTED_KINDS,
+            "rows": rows,
         })
 
     async def _logs(self, request: web.Request) -> web.Response:

@@ -659,14 +659,28 @@ CSRF state.
 
 1. In Protect: Settings → Control Plane → Integrations → Create
    API Key. Paste into `unifi.api_key` (or set `UNIFI_API_KEY`).
-2. In Protect: Alarm Manager → New Alarm. Add a "Custom Webhook"
-   trigger, set the webhook ID to the pattern the bridge will emit
-   (default `onvif-bridge:{protect_id}:{kind}` — substitute the
-   camera's Protect ID and the event kind). Configure the rule's
-   downstream actions (push notification, recording extension, etc.).
-3. Repeat for each (camera, event-kind) combination you care about.
-4. The bridge starts firing those triggers as the camera's onboard
-   AI emits ONVIF events.
+2. Open the bridge UI → **Setup** tab. It enumerates one row per
+   (discovered camera × supported kind) and shows the exact webhook
+   ID to use, with a copy button per row.
+3. In Protect: Alarm Manager → New Alarm. Add a "Custom Webhook"
+   trigger, paste the row's ID into the trigger ID field. Configure
+   downstream actions. Save.
+4. Back in the bridge UI, the Setup tab's status column flips to
+   "firing — last Xs ago" the next time that webhook ID is hit.
+
+### Why no auto-create
+
+Researched against the Protect 7.0.107 OpenAPI spec and hjdhjd's
+legacy-API reverse: neither surface exposes alarm-rule CRUD. Only
+the fire-trigger endpoint is published. Protect's own web UI must
+hit *something* to save a rule, but no public reverse exists. To
+add option 2 (auto-create rules) we'd need DevTools traffic
+captured from a live Protect controller during "Save Alarm Rule"
+— logged as a future possibility but not blocking.
+
+The Setup tab is the workaround: copy-paste IDs is ~20 seconds
+per rule, and the live "is this firing?" indicator gives instant
+feedback on whether the user pasted correctly.
 
 ### Status flags (image variant detection)
 

@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import aiohttp
@@ -61,6 +61,15 @@ class PushOutcome:
 
 
 @dataclass
+class WebhookFireStats:
+    """Per-webhook-id counters for the Setup helper UI."""
+    fires_ok: int = 0
+    fires_failed: int = 0
+    last_fire_epoch: float = 0.0
+    last_status: int = 0
+
+
+@dataclass
 class PusherStats:
     """Lightweight rolling counters for the Status dashboard."""
     pushes_ok: int = 0
@@ -69,6 +78,10 @@ class PusherStats:
     last_outcome_epoch: float = 0.0
     last_event: Optional[OnvifEvent] = None
     last_event_epoch: float = 0.0
+    # Per-webhook-id counters. Lets the Setup tab show the user
+    # whether each alarm rule they've configured in Protect is
+    # actually being fired by the bridge.
+    webhook_stats: dict[str, WebhookFireStats] = field(default_factory=dict)
 
 
 class ProtectPusher:
@@ -88,7 +101,10 @@ class ProtectPusher:
     ):
         self._base = host if host.startswith("http") else f"https://{host}"
         self._api_key = api_key
-        self._template = webhook_id_template or DEFAULT_WEBHOOK_ID_TEMPLATE
+        # Public so the web UI Setup tab can render the exact IDs we'll fire.
+        self.webhook_id_template = (
+            webhook_id_template or DEFAULT_WEBHOOK_ID_TEMPLATE
+        )
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
         self.stats = PusherStats()
@@ -114,7 +130,7 @@ class ProtectPusher:
 
     def _webhook_id(self, event: OnvifEvent) -> str:
         try:
-            return self._template.format(
+            return self.webhook_id_template.format(
                 protect_id=event.camera_protect_id,
                 kind=event.kind,
                 name=event.camera_name,
@@ -162,10 +178,20 @@ class ProtectPusher:
         outcome = await self._fire(webhook_id)
         outcome.webhook_id = webhook_id
 
+        # Per-webhook counters drive the Setup tab's "is this rule
+        # actually firing?" indicator.
+        wstats = self.stats.webhook_stats.setdefault(
+            webhook_id, WebhookFireStats(),
+        )
+        wstats.last_fire_epoch = time.time()
+        wstats.last_status = outcome.status
         if outcome.ok:
             self.stats.pushes_ok += 1
+            wstats.fires_ok += 1
         else:
             self.stats.pushes_failed += 1
+            wstats.fires_failed += 1
+
         self.stats.last_outcome = outcome
         self.stats.last_outcome_epoch = time.time()
         return outcome
