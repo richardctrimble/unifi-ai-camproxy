@@ -50,6 +50,10 @@ class CameraSubscription:
     consecutive_failures: int = 0
     is_connected: bool = False
     last_error: str = ""
+    # Topic strings the camera advertised via GetEventProperties.
+    # Populated once after a successful subscription. Lets the Setup
+    # tab show users which kinds their cameras can actually emit.
+    supported_topics: list[str] = field(default_factory=list)
 
 
 # ── Topic → kind classification ────────────────────────────────────────────
@@ -145,6 +149,71 @@ async def _build_camera(host: str, port: int, user: str, pwd: str):
     return cam
 
 
+def _walk_topic_tree(node, parent_path: str = "") -> list[str]:
+    """Flatten an ONVIF topic-set tree into a list of dotted paths.
+
+    `events.GetEventProperties().TopicSet` returns nested zeep
+    `_value_1` blocks like:
+
+        Element MyTopic
+          Element MyChild
+            ... (leaf marked with topic="true")
+
+    We walk the tree and emit every topic string the camera says it
+    can publish. Vendors are wildly inconsistent in how deep these
+    nest, so we accept whatever shape we find.
+    """
+    out: list[str] = []
+    if node is None:
+        return out
+    # zeep returns AnyObject / lxml Element — iterate children with
+    # tag and attrib accessors. Non-element objects are ignored.
+    children = getattr(node, "_value_1", None)
+    if children is None:
+        try:
+            children = list(node)
+        except TypeError:
+            children = []
+    for child in children or []:
+        tag = getattr(child, "tag", None) or getattr(child, "name", None) or ""
+        # tag may be qualified `{ns}LocalName` — strip ns
+        if isinstance(tag, str) and "}" in tag:
+            tag = tag.split("}", 1)[1]
+        if not tag:
+            continue
+        path = f"{parent_path}/{tag}" if parent_path else tag
+        attrib = getattr(child, "attrib", {}) or {}
+        is_topic = (
+            attrib.get("topic") == "true"
+            or attrib.get("{http://docs.oasis-open.org/wsn/t-1}topic") == "true"
+        )
+        if is_topic:
+            out.append(path)
+        out.extend(_walk_topic_tree(child, path))
+    return out
+
+
+async def _fetch_supported_topics(cam) -> list[str]:
+    """Best-effort enumeration of topics this camera advertises.
+
+    Uses ONVIF's GetEventProperties. Many cameras restrict it to admin
+    users, and a handful of cheap clones don't implement it at all —
+    those return an empty list and we silently fall through to the
+    PullMessages-based discovery (whatever topics actually fire will
+    eventually appear in last_event regardless).
+    """
+    try:
+        events = cam.create_events_service()
+        props = await asyncio.to_thread(events.GetEventProperties)
+        topic_set = getattr(props, "TopicSet", None)
+        topics = _walk_topic_tree(topic_set)
+        # De-dupe + sort for stable display.
+        return sorted(set(topics))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("GetEventProperties failed: %s", exc)
+        return []
+
+
 async def subscribe_camera(
     sub: CameraSubscription,
     cancel_event: Optional[asyncio.Event] = None,
@@ -181,6 +250,19 @@ async def subscribe_camera(
             backoff = 5
             logger.info("Subscribed to ONVIF events on %s (%s:%d)",
                         sub.name, sub.onvif_host, sub.onvif_port)
+
+            # Best-effort: ask the camera what topics it can emit so
+            # the Setup tab can show real options instead of guessing.
+            # Failure is silent — many cameras restrict this to admins.
+            try:
+                topics = await _fetch_supported_topics(cam)
+                if topics:
+                    sub.supported_topics = topics
+                    logger.info("%s advertises %d ONVIF topics",
+                                sub.name, len(topics))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Topic enumeration failed for %s: %s",
+                             sub.name, exc)
 
             while True:
                 if cancel_event is not None and cancel_event.is_set():
