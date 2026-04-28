@@ -175,15 +175,15 @@ _INDEX_HTML = """<!doctype html>
   <div id="status-error-banner"></div>
   <div class="card">
     <div class="card-header"><h3>Bridge</h3></div>
-    <div class="grid" id="bridge-grid"></div>
+    <div class="grid" id="bridge-grid"><span class="empty">Loading…</span></div>
   </div>
   <div class="card">
     <div class="card-header"><h3>Cameras (ONVIF) discovered in Protect</h3></div>
-    <div id="cams-block"></div>
+    <div id="cams-block"><span class="empty">Loading…</span></div>
   </div>
   <div class="card">
     <div class="card-header"><h3>Push activity</h3></div>
-    <div class="grid" id="push-grid"></div>
+    <div class="grid" id="push-grid"><span class="empty">Loading…</span></div>
   </div>
 </div>
 
@@ -328,50 +328,62 @@ document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click'
   if(t.dataset.pane==='unifi')loadUnifi();
 });});
 
-async function refreshStatus(){try{
-  var data=await(await fetch('/api/status')).json();
-  var b=data.build||{};var bridge=data.bridge||{};
+async function refreshStatus(){
   var banner=document.getElementById('status-error-banner');
-  if(bridge.last_discovery_error){
-    banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
-  }else{banner.innerHTML='';}
-  document.getElementById('bridge-grid').innerHTML=
-    '<div class="row"><span class="label">Image variant</span><span><code>'+esc(data.variant||'onvif')+'</code></span></div>'+
-    '<div class="row"><span class="label">Build</span><span>'+esc(b.git_sha_short||'?')+' ('+esc(b.git_ref||'?')+')</span></div>'+
-    '<div class="row"><span class="label">Built</span><span>'+esc(b.build_time||'?')+'</span></div>'+
-    '<div class="row"><span class="label">Uptime</span><span>'+(data.uptime_seconds||0)+'s</span></div>'+
-    '<div class="row"><span class="label">Last discovery</span><span>'+fmtAgo(bridge.last_discovery_epoch)+'</span></div>'+
-    '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
-  var cams=data.cameras||[];var camsEl=document.getElementById('cams-block');
-  if(!cams.length){
-    camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
-  }else{
-    var html='<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
-    cams.forEach(function(c){
-      var sub=(data.subscriptions||{})[c.protect_id];
-      var subStat=sub?(sub.is_connected?'connected':'connecting…'):'no creds';
-      var subCls=sub?(sub.is_connected?'ok':'warn'):'err';
-      var ev=sub&&sub.last_event;
-      var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
-      var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
-      html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'">!</span>':'')+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
-    });html+='</div>';camsEl.innerHTML=html;
+  try{
+    var resp=await fetch('/api/status');
+    if(!resp.ok){
+      var errBody='';try{errBody=await resp.text();}catch(_){}
+      banner.innerHTML='<div class="alert alert-err">Status endpoint returned HTTP '+resp.status+(errBody?' — <code>'+esc(errBody.slice(0,200))+'</code>':'')+'.<br>Check container logs for details.</div>';
+      return;
+    }
+    var data=await resp.json();
+    var b=data.build||{};var bridge=data.bridge||{};
+    if(bridge.last_discovery_error){
+      banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
+    }else{banner.innerHTML='';}
+    document.getElementById('bridge-grid').innerHTML=
+      '<div class="row"><span class="label">Image variant</span><span><code>'+esc(data.variant||'onvif')+'</code></span></div>'+
+      '<div class="row"><span class="label">Build</span><span>'+esc(b.git_sha_short||'?')+' ('+esc(b.git_ref||'?')+')</span></div>'+
+      '<div class="row"><span class="label">Built</span><span>'+esc(b.build_time||'?')+'</span></div>'+
+      '<div class="row"><span class="label">Uptime</span><span>'+(data.uptime_seconds||0)+'s</span></div>'+
+      '<div class="row"><span class="label">Last discovery</span><span>'+fmtAgo(bridge.last_discovery_epoch)+'</span></div>'+
+      '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
+    var cams=data.cameras||[];var camsEl=document.getElementById('cams-block');
+    if(!cams.length){
+      camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
+    }else{
+      var html='<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
+      cams.forEach(function(c){
+        var sub=(data.subscriptions||{})[c.protect_id];
+        var subStat=sub?(sub.is_connected?'connected':'connecting…'):'no creds';
+        var subCls=sub?(sub.is_connected?'ok':'warn'):'err';
+        var ev=sub&&sub.last_event;
+        var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
+        var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
+        html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'"> !</span>':'')+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
+      });html+='</div>';camsEl.innerHTML=html;
+    }
+    var ps=data.pusher_stats||{};var le=ps.last_event;var lo=ps.last_outcome;
+    document.getElementById('push-grid').innerHTML=
+      '<div class="row"><span class="label">Alarm triggers OK / failed</span><span><span class="ok">'+(ps.pushes_ok||0)+'</span> / <span class="err">'+(ps.pushes_failed||0)+'</span></span></div>'+
+      '<div class="row"><span class="label">Last event</span><span>'+(le?fmtAgo(ps.last_event_epoch)+' — '+esc(le.camera_name)+' / <span class="pill kind-'+esc(le.kind)+'">'+esc(le.kind)+'</span>':'—')+'</span></div>'+
+      '<div class="row"><span class="label">Last webhook id</span><span><code>'+esc(lo&&lo.webhook_id||'—')+'</code></span></div>'+
+      '<div class="row"><span class="label">Last outcome</span><span class="'+(lo&&lo.ok?'ok':'err')+'">'+(lo?esc(lo.method)+' — '+esc(lo.message||(lo.ok?'OK':'failed')):'—')+'</span></div>';
+  }catch(e){
+    banner.innerHTML='<div class="alert alert-err">Failed to reach /api/status: '+esc(String(e))+'<br>Is the bridge container running? Check <code>docker compose logs</code>.</div>';
   }
-  var ps=data.pusher_stats||{};var le=ps.last_event;var lo=ps.last_outcome;
-  document.getElementById('push-grid').innerHTML=
-    '<div class="row"><span class="label">Alarm triggers OK / failed</span><span><span class="ok">'+(ps.pushes_ok||0)+'</span> / <span class="err">'+(ps.pushes_failed||0)+'</span></span></div>'+
-    '<div class="row"><span class="label">Last event</span><span>'+(le?fmtAgo(ps.last_event_epoch)+' — '+esc(le.camera_name)+' / <span class="pill kind-'+esc(le.kind)+'">'+esc(le.kind)+'</span>':'—')+'</span></div>'+
-    '<div class="row"><span class="label">Last webhook id</span><span><code>'+esc(lo&&lo.webhook_id||'—')+'</code></span></div>'+
-    '<div class="row"><span class="label">Last outcome</span><span class="'+(lo&&lo.ok?'ok':'err')+'">'+(lo?esc(lo.method)+' — '+esc(lo.message||(lo.ok?'OK':'failed')):'—')+'</span></div>';
-}catch(e){}}
+}
 
-async function loadUnifi(){try{
-  var d=await(await fetch('/api/config/unifi')).json();
-  document.getElementById('unifi-host').value=d.host||'';
-  document.getElementById('unifi-username').value=d.username||'';
-  document.getElementById('unifi-password').value=d.password||'';
-  document.getElementById('unifi-apikey').value=d.api_key||'';
-}catch(e){}}
+async function loadUnifi(){
+  try{
+    var d=await(await fetch('/api/config/unifi')).json();
+    document.getElementById('unifi-host').value=d.host||'';
+    document.getElementById('unifi-username').value=d.username||'';
+    document.getElementById('unifi-password').value=d.password||'';
+    document.getElementById('unifi-apikey').value=d.api_key||'';
+  }catch(e){setMsg('save-unifi-result',false,'Could not load config: '+e);}
+}
 
 document.getElementById('btn-test-userpass').addEventListener('click',async function(){
   var host=document.getElementById('unifi-host').value.trim();
@@ -397,12 +409,14 @@ document.getElementById('btn-save-unifi').addEventListener('click',async functio
   try{var r=await(await fetch('/api/config/unifi',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({host,username:user,password:pass,api_key:apikey})})).json();setMsg('save-unifi-result',r.ok,r.message);}catch(e){setMsg('save-unifi-result',false,'Save failed: '+e);}
 });
 
-async function loadOnvif(){try{
-  var d=await(await fetch('/api/config/onvif')).json();
-  document.getElementById('onvif-username').value=d.username||'';
-  document.getElementById('onvif-password').value=d.password||'';
-  document.getElementById('onvif-port').value=d.port||'80';
-}catch(e){}}
+async function loadOnvif(){
+  try{
+    var d=await(await fetch('/api/config/onvif')).json();
+    document.getElementById('onvif-username').value=d.username||'';
+    document.getElementById('onvif-password').value=d.password||'';
+    document.getElementById('onvif-port').value=d.port||'80';
+  }catch(e){setMsg('save-onvif-result',false,'Could not load config: '+e);}
+}
 
 document.getElementById('btn-save-onvif').addEventListener('click',async function(){
   var user=document.getElementById('onvif-username').value.trim();
@@ -412,66 +426,75 @@ document.getElementById('btn-save-onvif').addEventListener('click',async functio
   try{var r=await(await fetch('/api/config/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:user,password:pass,port})})).json();setMsg('save-onvif-result',r.ok,r.message);}catch(e){setMsg('save-onvif-result',false,'Save failed: '+e);}
 });
 
-async function loadCamOnvif(){try{
-  var cams=await(await fetch('/api/cameras/onvif')).json();
+async function loadCamOnvif(){
   var el=document.getElementById('cam-onvif-block');
-  if(!cams.length){el.innerHTML='<span class="empty">No cameras discovered yet — populates after the first successful Protect discovery.</span>';return;}
-  var html='';
-  cams.forEach(function(c){
-    var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':(c.last_error?'error':'connecting…');
-    var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
-    var userPh=c.fleet_username?'fleet: '+esc(c.fleet_username):'(fleet creds unset)';
-    var portPh=c.fleet_port||80;
-    html+='<div class="cam-onvif-row" data-pid="'+esc(c.protect_id)+'">'
-      +'<div class="cam-onvif-head">'
-      +'<span class="cam-name">'+esc(c.name)+'</span>'
-      +'<span class="cam-host"><code>'+esc(c.host||'?')+'</code></span>'
-      +'<span class="cam-status '+statCls+'">'+esc(statTxt)+'</span>'
-      +'</div>'
-      +'<div class="cam-onvif-fields">'
-      +'<input type="text" class="cam-user" value="'+esc(c.override_username||'')+'" placeholder="'+userPh+'" autocomplete="off">'
-      +'<input type="password" class="cam-pass" value="'+esc(c.override_password||'')+'" placeholder="(inherit fleet password)" autocomplete="new-password">'
-      +'<input type="text" class="cam-port" value="'+esc(c.override_port||'')+'" placeholder="'+portPh+'">'
-      +'<button class="btn btn-sm cam-save">Save</button>'
-      +'</div>'
-      +'<div class="cam-onvif-topics"><div class="topic-list">'+topics+'</div></div>'
-      +'<div class="status-msg cam-msg" style="margin-top:4px;"></div>'
-      +'</div>';
-  });el.innerHTML=html;
-  el.querySelectorAll('.cam-onvif-row').forEach(function(row){
-    var btn=row.querySelector('.cam-save');
-    btn.addEventListener('click',async function(){
-      var pid=row.dataset.pid;
-      var user=row.querySelector('.cam-user').value.trim();
-      var pass=row.querySelector('.cam-pass').value;
-      var portRaw=row.querySelector('.cam-port').value.trim();
-      var port=portRaw?parseInt(portRaw):0;
-      var msg=row.querySelector('.cam-msg');
-      msg.className='status-msg cam-msg ok';msg.textContent='Saving…';
-      try{
-        var r=await(await fetch('/api/cameras/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({protect_id:pid,username:user,password:pass,port:port})})).json();
-        msg.className='status-msg cam-msg '+(r.ok?'ok':'err');
-        msg.textContent=r.message||(r.ok?'Saved':'Failed');
-      }catch(e){msg.className='status-msg cam-msg err';msg.textContent='Save failed: '+e;}
+  try{
+    var cams=await(await fetch('/api/cameras/onvif')).json();
+    if(!cams.length){el.innerHTML='<span class="empty">No cameras discovered yet — populates after the first successful Protect discovery.</span>';return;}
+    var html='';
+    cams.forEach(function(c){
+      var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':(c.last_error?'error':'connecting…');
+      var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
+      var userPh=c.fleet_username?'fleet: '+esc(c.fleet_username):'(fleet creds unset)';
+      var portPh=c.fleet_port||80;
+      html+='<div class="cam-onvif-row" data-pid="'+esc(c.protect_id)+'">'
+        +'<div class="cam-onvif-head">'
+        +'<span class="cam-name">'+esc(c.name)+'</span>'
+        +'<span class="cam-host"><code>'+esc(c.host||'?')+'</code></span>'
+        +'<span class="cam-status '+statCls+'">'+esc(statTxt)+'</span>'
+        +'</div>'
+        +'<div class="cam-onvif-fields">'
+        +'<input type="text" class="cam-user" value="'+esc(c.override_username||'')+'" placeholder="'+userPh+'" autocomplete="off">'
+        +'<input type="password" class="cam-pass" value="'+esc(c.override_password||'')+'" placeholder="(inherit fleet password)" autocomplete="new-password">'
+        +'<input type="text" class="cam-port" value="'+esc(c.override_port||'')+'" placeholder="'+portPh+'">'
+        +'<button class="btn btn-sm cam-save">Save</button>'
+        +'</div>'
+        +'<div class="cam-onvif-topics"><div class="topic-list">'+topics+'</div></div>'
+        +'<div class="status-msg cam-msg" style="margin-top:4px;"></div>'
+        +'</div>';
+    });el.innerHTML=html;
+    el.querySelectorAll('.cam-onvif-row').forEach(function(row){
+      var btn=row.querySelector('.cam-save');
+      btn.addEventListener('click',async function(){
+        var pid=row.dataset.pid;
+        var user=row.querySelector('.cam-user').value.trim();
+        var pass=row.querySelector('.cam-pass').value;
+        var portRaw=row.querySelector('.cam-port').value.trim();
+        var port=portRaw?parseInt(portRaw):0;
+        var msg=row.querySelector('.cam-msg');
+        msg.className='status-msg cam-msg ok';msg.textContent='Saving…';
+        try{
+          var r=await(await fetch('/api/cameras/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({protect_id:pid,username:user,password:pass,port:port})})).json();
+          msg.className='status-msg cam-msg '+(r.ok?'ok':'err');
+          msg.textContent=r.message||(r.ok?'Saved':'Failed');
+        }catch(e){msg.className='status-msg cam-msg err';msg.textContent='Save failed: '+e;}
+      });
     });
-  });
-}catch(e){}}
+  }catch(e){
+    el.innerHTML='<div class="alert alert-err">Failed to load camera ONVIF data: '+esc(String(e))+'</div>';
+  }
+}
 
-async function refreshSetup(){try{
-  var data=await(await fetch('/api/setup')).json();
-  document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
-  var rows=data.rows||[];var el=document.getElementById('setup-table');
-  if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
-  var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
-  rows.forEach(function(r){
-    var status,statusCls;
-    if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
-    else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
-    else{status='not yet fired';statusCls='label';}
-    html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
-  });html+='</div>';el.innerHTML=html;
-  el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
-}catch(e){}}
+async function refreshSetup(){
+  var el=document.getElementById('setup-table');
+  try{
+    var data=await(await fetch('/api/setup')).json();
+    document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
+    var rows=data.rows||[];
+    if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
+    var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
+    rows.forEach(function(r){
+      var status,statusCls;
+      if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
+      else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
+      else{status='not yet fired';statusCls='label';}
+      html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
+    });html+='</div>';el.innerHTML=html;
+    el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
+  }catch(e){
+    el.innerHTML='<div class="alert alert-err">Failed to load setup data: '+esc(String(e))+'</div>';
+  }
+}
 
 async function refreshLogs(){var lines=document.getElementById('log-lines').value;try{var resp=await fetch('/api/logs?lines='+encodeURIComponent(lines));var text=await resp.text();document.getElementById('log-output').textContent=text||'(empty)';}catch(e){document.getElementById('log-output').textContent='Failed to load logs: '+e;}}
 
