@@ -364,17 +364,39 @@ async function refreshStatus(){
       '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
     var cams=data.cameras||[];var camsEl=document.getElementById('cams-block');
     if(!cams.length){
-      camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
+      camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#888;">UniFi credentials</a>, then click <strong>Get cameras from Protect</strong> above.</span>';
     }else{
-      var html='<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
+      var nConn=0,nAuth=0,nNoCred=0,nConnecting=0;
       cams.forEach(function(c){
         var sub=(data.subscriptions||{})[c.protect_id];
-        var subStat=sub?(sub.is_connected?'connected':'connecting…'):'no creds';
-        var subCls=sub?(sub.is_connected?'ok':'warn'):'err';
+        if(!sub){nNoCred++;}
+        else if(sub.auth_locked){nAuth++;}
+        else if(sub.is_connected){nConn++;}
+        else{nConnecting++;}
+      });
+      var summary='<div style="font-size:12px;color:#bbb;margin-bottom:10px;">'
+        +'<strong>'+cams.length+'</strong> discovered'
+        +' · <span class="ok">'+nConn+' connected</span>'
+        +(nConnecting?' · <span class="warn">'+nConnecting+' connecting</span>':'')
+        +(nAuth?' · <span class="err">'+nAuth+' auth failed</span>':'')
+        +(nNoCred?' · <span class="err">'+nNoCred+' no creds</span>':'')
+        +'</div>';
+      var html=summary+'<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
+      cams.forEach(function(c){
+        var sub=(data.subscriptions||{})[c.protect_id];
+        var subStat,subCls,subExtra='';
+        if(!sub){subStat='no creds';subCls='err';}
+        else if(sub.auth_locked){
+          subStat='auth failed';subCls='err';
+          subExtra=' <a href="#" onclick="switchTab(&apos;onvif&apos;);return false;" style="color:#fca5a5;font-size:11px;">fix →</a>';
+        }
+        else if(sub.is_connected){subStat='connected';subCls='ok';}
+        else{subStat='connecting…';subCls='warn';}
+        var errIndicator=(sub&&sub.last_error&&!sub.auth_locked)?'<span class="err" title="'+esc(sub.last_error)+'"> !</span>':'';
         var ev=sub&&sub.last_event;
         var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
         var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
-        html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'"> !</span>':'')+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
+        html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+errIndicator+subExtra+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
       });html+='</div>';camsEl.innerHTML=html;
     }
     var ps=data.pusher_stats||{};var le=ps.last_event;var lo=ps.last_outcome;
@@ -937,6 +959,7 @@ class BridgeWebTool:
             ev = sub.last_event
             sub_payload[pid] = {
                 "is_connected": sub.is_connected,
+                "auth_locked": sub.auth_locked,
                 "consecutive_failures": sub.consecutive_failures,
                 "last_pull_epoch": sub.last_pull_epoch,
                 "last_error": sub.last_error,
