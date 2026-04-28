@@ -1,38 +1,28 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Legacy NVIDIA CUDA override — apply on top of docker-compose.yml AND
-# docker-compose.full.yml. Kept for backward compatibility with users on
-# the legacy all-in-one full image.
-#
-# For new deployments prefer docker-compose.detect-cuda.yml — the detect
-# image is the focused replacement for full + CUDA:
-#
-#   docker compose \
-#     -f docker-compose.yml \
-#     -f docker-compose.detect-cuda.yml \
-#     up -d --build
-#
-# Legacy usage (full + CUDA):
-#
-#   docker compose \
-#     -f docker-compose.yml \
-#     -f docker-compose.full.yml \
-#     -f docker-compose.gpu.yml \
-#     up -d --build
+# NVIDIA CUDA AI image override — apply on top of docker-compose.yml.
+# Same as docker-compose.ai.yml but builds/runs the CUDA variant.
 #
 # Requirements on the host:
-#   1. NVIDIA GPU with a recent driver (for CUDA 12.1 runtime compat)
-#   2. nvidia-container-toolkit installed (so Docker can see the GPU)
+#   1. NVIDIA GPU with a recent driver (CUDA 12.1 runtime compat)
+#   2. nvidia-container-toolkit installed so Docker can see the GPU
+#
+# Quick start:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.ai-cuda.yml \
+#     up -d --build
 #
 # Once running, check `docker compose logs -f` — AIEngine logs its
 # chosen device on startup ("Running inference on: cuda"). If you see
-# "cpu" there, the GPU isn't being passed through.
+# "cpu", the GPU isn't being passed through.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
   unifi-ai-camproxy:
     build:
-      dockerfile: Dockerfile.full-cuda
-    image: unifi-ai-camproxy:full-cuda
+      dockerfile: Dockerfile.ai-cuda
+    image: unifi-ai-camproxy:ai-cuda
     deploy:
       resources:
         reservations:

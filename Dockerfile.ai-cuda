@@ -1,14 +1,12 @@
-# ── unifi-ai-camproxy: vehicle/person detection image — NVIDIA CUDA ──────────
+# ── unifi-ai-camproxy: local AI image — NVIDIA CUDA variant (:ai-cuda) ────────
 #
-# Same as Dockerfile.detect but uses CUDA 12.1 PyTorch instead of CPU+OpenVINO.
-# Requires nvidia-container-toolkit on the Docker host.
+# Same as Dockerfile.ai but with the CUDA 12.1 PyTorch wheel instead of
+# the CPU wheel. Requires an NVIDIA GPU + nvidia-container-toolkit on the
+# host. AIEngine auto-detects CUDA at startup.
 #
-# Build via docker-compose.detect-cuda.yml or directly:
-#   docker build -f Dockerfile.detect-cuda -t unifi-ai-camproxy:detect-cuda .
-#
-# For the CPU + Intel variant use Dockerfile.detect.
+# Final image size: ~2.5 GB.
 
-# ── Stage 1: build unifi-cam-proxy ───────────────────────────────────────────
+# ── Stage 1: build unifi-cam-proxy (protocol layer) ──────────────────────────
 FROM python:3.11-slim AS proxy-builder
 
 WORKDIR /build
@@ -22,7 +20,7 @@ RUN git clone https://github.com/keshavdv/unifi-cam-proxy.git \
 FROM python:3.11-slim
 
 LABEL maintainer="unifi-ai-camproxy"
-LABEL description="UniFi AI camera proxy — person/vehicle detection (NVIDIA CUDA)"
+LABEL description="UniFi AI camera proxy — local inference (NVIDIA CUDA)"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -42,6 +40,8 @@ RUN for file in requirements.txt setup.cfg setup.py; do \
     done
 RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
 
+# CUDA 12.1 PyTorch wheel (~2GB). Pass --build-arg CUDA_FLAVOR=cu118
+# for older NVIDIA drivers.
 ARG CUDA_FLAVOR=cu121
 RUN pip install --no-cache-dir \
       --index-url https://download.pytorch.org/whl/${CUDA_FLAVOR} \
@@ -51,19 +51,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY docker-entrypoint.py /app/
-
-# Shared source utilities (no line_crossing.py — detect mode doesn't need it)
-COPY src/ai_engine.py      /app/src/
-COPY src/auto_config.py    /app/src/
-COPY src/build_info.py     /app/src/
-COPY src/cert_gen.py       /app/src/
-COPY src/main.py           /app/src/
-COPY src/unifi_auth.py     /app/src/
-COPY src/unifi_client.py   /app/src/
-COPY src/web_tool.py       /app/src/
-
-# Detection package entrypoint
-COPY src/detect/           /app/src/detect/
+COPY src/ /app/src/
 
 ARG GIT_SHA=unknown
 ARG GIT_REF=unknown
@@ -71,18 +59,19 @@ ARG BUILD_TIME=unknown
 ENV APP_GIT_SHA=$GIT_SHA
 ENV APP_GIT_REF=$GIT_REF
 ENV APP_BUILD_TIME=$BUILD_TIME
-ENV APP_IMAGE_VARIANT=detect-cuda
+ENV APP_IMAGE_VARIANT=ai-cuda
 RUN printf '%s\n' \
       "git_sha: ${GIT_SHA}" \
       "git_ref: ${GIT_REF}" \
       "build_time: ${BUILD_TIME}" \
-      "image_variant: detect-cuda" \
+      "image_variant: ai-cuda" \
       > /app/BUILD_INFO
 
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 VOLUME ["/config"]
 EXPOSE 8091
+
 WORKDIR /app/src
 
 ENTRYPOINT ["python", "/app/docker-entrypoint.py"]

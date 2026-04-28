@@ -206,12 +206,10 @@ def main():
 
     # Hand off to the right mode entrypoint based on the image variant.
     variant = os.environ.get("APP_IMAGE_VARIANT", "onvif").lower()
-    if variant == "full":
+    if variant in ("ai", "ai-cuda", "full", "detect", "detect-cuda", "lines"):
+        # Local AI inference mode (person/vehicle detection + line crossing).
+        # Legacy variant names kept as backward-compat aliases.
         os.execvp(sys.executable, [sys.executable, "main.py", str(CONFIG_PATH)])
-    elif variant in ("detect", "detect-cuda"):
-        os.execvp(sys.executable, [sys.executable, "-m", "detect.main"])
-    elif variant == "lines":
-        os.execvp(sys.executable, [sys.executable, "-m", "lines.main"])
     else:
         # Default: ONVIF bridge (variant == "onvif" or unrecognised)
         os.execvp(sys.executable, [sys.executable, "-m", "onvif_bridge.main"])

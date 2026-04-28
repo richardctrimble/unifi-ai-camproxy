@@ -1,25 +1,22 @@
-# ── unifi-ai-camproxy: line-crossing detection image (:lines) ────────────────
+# ── unifi-ai-camproxy: local AI image (:ai) ───────────────────────────────────
 #
-# Spoofs RTSP cameras into UniFi Protect and runs YOLOv8 detection with
-# virtual line-crossing zones. Users draw crossing lines in the web UI
-# (Lines tab); any tracked person or vehicle that crosses a line fires a
-# dedicated detection event in Protect.
+# Spoofs RTSP cameras into UniFi Protect as AI cameras. Runs YOLOv8
+# person/vehicle detection locally. Virtual line-crossing zones can be
+# drawn in the web UI (Lines tab).
 #
-# This image includes line_crossing.py. The :detect image intentionally
-# omits it — keeping the two images independent so changes to line-crossing
-# logic don't risk breaking the detection pipeline.
+# Hardware: CPU + Intel OpenVINO (iGPU / dGPU / NPU via /dev/dri passthrough).
+# For NVIDIA CUDA use Dockerfile.ai-cuda.
 #
-# Hardware: CPU + Intel OpenVINO (iGPU/dGPU/NPU via /dev/dri passthrough).
-# For NVIDIA CUDA see Dockerfile.detect-cuda (detect and lines-cuda share the
-# same CUDA requirements; a lines-cuda image can be built by substituting the
-# CPU torch install and the APP_IMAGE_VARIANT).
+# Final image size: ~1.5 GB.
 
-# ── Stage 1: build unifi-cam-proxy ───────────────────────────────────────────
+# ── Stage 1: build unifi-cam-proxy (protocol layer) ──────────────────────────
 FROM python:3.11-slim AS proxy-builder
 
 WORKDIR /build
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
+# Pin upstream to a known-good commit so rebuilds are reproducible.
+# Bump this after testing against a newer commit — don't track HEAD.
 ARG UNIFI_CAM_PROXY_REF=cc6d3fc7cdae9f1dfce575627089632aec696403
 RUN git clone https://github.com/keshavdv/unifi-cam-proxy.git \
     && git -C unifi-cam-proxy checkout "$UNIFI_CAM_PROXY_REF"
@@ -28,7 +25,7 @@ RUN git clone https://github.com/keshavdv/unifi-cam-proxy.git \
 FROM python:3.11-slim
 
 LABEL maintainer="unifi-ai-camproxy"
-LABEL description="UniFi AI camera proxy — virtual line-crossing (CPU + Intel)"
+LABEL description="UniFi AI camera proxy — local inference (CPU + Intel OpenVINO)"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -48,11 +45,15 @@ RUN for file in requirements.txt setup.cfg setup.py; do \
     done
 RUN pip install --no-cache-dir -e /app/unifi-cam-proxy
 
+# CPU PyTorch wheel — small (~800MB), satisfies ultralytics' import.
 RUN pip install --no-cache-dir \
       --index-url https://download.pytorch.org/whl/cpu \
       torch torchvision
 
-# Intel compute runtime — same rationale as Dockerfile.full.
+# Intel compute runtime. intel-opencl-icd from Debian bookworm non-free-firmware
+# covers Gen8–Gen12 iGPUs (everything commonly in TrueNAS / mini-PC hardware).
+# libze1 is the Level Zero loader; OpenVINO falls back to OpenCL when L0 GPU
+# plugin isn't available, which is fine for Gen9–Gen11.
 RUN echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware" \
         > /etc/apt/sources.list.d/nonfree.list \
      && echo "deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" \
@@ -63,7 +64,8 @@ RUN echo "deb http://deb.debian.org/debian bookworm main contrib non-free non-fr
         intel-opencl-icd \
         ocl-icd-libopencl1 \
         libze1 \
-     && (apt-get install -y --no-install-recommends intel-level-zero-gpu || true) \
+     && (apt-get install -y --no-install-recommends intel-level-zero-gpu \
+         || echo "WARN: intel-level-zero-gpu not available — OpenVINO will use OpenCL only") \
      && rm -rf /var/lib/apt/lists/* \
      && pip install --no-cache-dir "openvino>=2024.0.0"
 
@@ -71,20 +73,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY docker-entrypoint.py /app/
-
-# Shared source utilities including line_crossing.py
-COPY src/ai_engine.py      /app/src/
-COPY src/auto_config.py    /app/src/
-COPY src/build_info.py     /app/src/
-COPY src/cert_gen.py       /app/src/
-COPY src/line_crossing.py  /app/src/
-COPY src/main.py           /app/src/
-COPY src/unifi_auth.py     /app/src/
-COPY src/unifi_client.py   /app/src/
-COPY src/web_tool.py       /app/src/
-
-# Line-crossing package entrypoint
-COPY src/lines/            /app/src/lines/
+COPY src/ /app/src/
 
 ARG GIT_SHA=unknown
 ARG GIT_REF=unknown
@@ -92,18 +81,20 @@ ARG BUILD_TIME=unknown
 ENV APP_GIT_SHA=$GIT_SHA
 ENV APP_GIT_REF=$GIT_REF
 ENV APP_BUILD_TIME=$BUILD_TIME
-ENV APP_IMAGE_VARIANT=lines
+ENV APP_IMAGE_VARIANT=ai
 RUN printf '%s\n' \
       "git_sha: ${GIT_SHA}" \
       "git_ref: ${GIT_REF}" \
       "build_time: ${BUILD_TIME}" \
-      "image_variant: lines" \
+      "image_variant: ai" \
       > /app/BUILD_INFO
 
+# Pre-download YOLOv8n so first run doesn't stall on model fetch
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 VOLUME ["/config"]
 EXPOSE 8091
+
 WORKDIR /app/src
 
 ENTRYPOINT ["python", "/app/docker-entrypoint.py"]

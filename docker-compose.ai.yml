@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local AI image override — apply on top of docker-compose.yml for
+# person/vehicle detection + virtual line-crossing using local YOLOv8
+# inference. CPU + Intel OpenVINO by default.
+#
+# For NVIDIA GPU hosts use docker-compose.ai-cuda.yml instead.
+# For Intel iGPU/dGPU/NPU passthrough, also layer docker-compose.intel.yml.
+#
+# Quick start:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.ai.yml \
+#     up -d --build
+#
+# With Intel GPU acceleration:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.ai.yml \
+#     -f docker-compose.intel.yml \
+#     up -d
+#
+# Once running, open http://<host>:8091/ and:
+#   1. UniFi tab  — enter host + credentials, Test, Save.
+#   2. Setup tab  — Add Camera, paste RTSP URL, Save All, restart.
+#   3. Lines tab  — (optional) click two points to draw a crossing line.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  unifi-ai-camproxy:
+    build:
+      dockerfile: Dockerfile.ai
+    image: unifi-ai-camproxy:ai
