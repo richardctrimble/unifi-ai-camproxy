@@ -38,7 +38,7 @@ logger = logging.getLogger("onvif_bridge.web")
 
 CONFIG_PATH = Path("/config/config.yml")
 
-SUPPORTED_KINDS = ["person", "vehicle", "line_crossing", "motion", "audio"]
+SUPPORTED_KINDS = ["person", "vehicle", "line_crossing", "motion", "audio", "face"]
 DEFAULT_WEBHOOK_TEMPLATE = "onvif-bridge:{protect_id}:{kind}"
 
 _RTSP_PWD_RE = re.compile(r"(rtsp://[^:]+:)([^@]+)(@)")
@@ -87,6 +87,7 @@ _INDEX_HTML = """<!doctype html>
  .pill.kind-line_crossing { background:#5f3a1e; color:#fa4; }
  .pill.kind-motion { background:#333; color:#bbb; }
  .pill.kind-audio { background:#3b1e5f; color:#c8a; }
+ .pill.kind-face { background:#3b2e1e; color:#f9c; }
  code { background:#111; padding:1px 5px; border-radius:3px; font-size:12px; word-break:break-all; }
  .copy-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-width:0; }
  .copy-row code { flex:1 1 200px; min-width:0; padding:4px 8px; font-size:12px; overflow-x:auto; white-space:nowrap; }

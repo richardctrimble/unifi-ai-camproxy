@@ -72,9 +72,16 @@ _KIND_RULES: list[tuple[str, str]] = [
     ("objectsinside",      "line_crossing"),
     ("audioanalytics",     "audio"),
     ("detectedsound",      "audio"),
+    ("audiodetect",        "audio"),
     ("cellmotiondetector", "motion"),
     ("motionalarm",        "motion"),
     ("motiondetect",       "motion"),
+    # Face rules must come BEFORE the generic objectdetector rule — first
+    # match wins and objectdetector/face is a substring of objectdetector.
+    ("objectdetector/face", "face"),
+    ("recognition/face",    "face"),
+    ("facedetect",          "face"),
+    ("faceregion",          "face"),
     # Generic ObjectDetector — many cameras use this for their on-board
     # AI. Treat as person by default since that's the most common use.
     ("objectdetector",     "person"),
