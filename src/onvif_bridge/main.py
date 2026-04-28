@@ -319,6 +319,11 @@ async def main() -> None:
     )
     await pusher.start()
 
+    # Event-driven discovery: pre-set so the first run happens on startup;
+    # the "Get cameras from Protect" button sets it again for manual re-discovery.
+    discover_event = asyncio.Event()
+    discover_event.set()
+
     # Lightweight web UI — run alongside the discovery loop.
     web_task: asyncio.Task | None = None
     web_cfg = cfg.get("web_tool", {}) or {}
@@ -342,11 +347,6 @@ async def main() -> None:
             web_task = asyncio.create_task(web.run(port), name="web")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bridge web UI failed to start: %s", exc)
-
-    # Event-driven discovery: pre-set so the first run happens on startup;
-    # the button in the web UI sets it again for manual re-discovery.
-    discover_event = asyncio.Event()
-    discover_event.set()
 
     discovery_task = asyncio.create_task(
         _discovery_loop(cfg, pusher, discover_event), name="discovery",
