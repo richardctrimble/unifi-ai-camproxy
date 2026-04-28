@@ -61,8 +61,8 @@ _INDEX_HTML = """<!doctype html>
 <title>unifi-ai-camproxy / ONVIF bridge</title>
 <style>
  * { box-sizing: border-box; }
- html, body { max-width:100%; overflow-x:hidden; }
- body { font-family: -apple-system, system-ui, sans-serif; background:#1a1a1a; color:#ddd; margin:0 auto; padding:18px; max-width:1100px; }
+ html, body { overflow-x:hidden; }
+ body { font-family: -apple-system, system-ui, sans-serif; background:#1a1a1a; color:#ddd; margin:0; padding:18px; }
  h1 { font-size:18px; margin:0 0 12px; }
  h4 { margin:14px 0 6px; font-size:13px; color:#bbb; }
  .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; border-bottom:1px solid #333; }
@@ -90,7 +90,7 @@ _INDEX_HTML = """<!doctype html>
  .pill.kind-face { background:#3b2e1e; color:#f9c; }
  code { background:#111; padding:1px 5px; border-radius:3px; font-size:12px; word-break:break-all; }
  .copy-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-width:0; }
- .copy-row code { flex:1 1 200px; min-width:0; padding:4px 8px; font-size:12px; overflow-x:auto; white-space:nowrap; }
+ .copy-row code { flex:1 1 200px; min-width:0; padding:4px 8px; font-size:12px; overflow:hidden; word-break:break-all; }
  .copy-btn { background:#333; border:0; color:#ddd; padding:4px 10px; border-radius:3px; cursor:pointer; font-size:12px; }
  .copy-btn:hover { background:#444; }
  .copy-btn.copied { background:#0d3b2c; color:#6f6; }
