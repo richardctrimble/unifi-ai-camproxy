@@ -55,6 +55,12 @@ class CameraSubscription:
     # a credential update or an explicit retry from the UI.
     auth_locked: bool = False
     supported_topics: list[str] = field(default_factory=list)
+    # Per-kind event counters since the bridge started. Keys are the
+    # kind strings produced by classify_topic ("motion", "person",
+    # "face", "audio", "line_crossing", "vehicle", "unknown"). Surfaces
+    # in the Alarm Setup tab so the user can see which kinds a camera
+    # actually emits in practice (vs. just what it advertises).
+    event_counts: dict = field(default_factory=dict)
 
 
 # ── Topic → kind classification ────────────────────────────────────────────
@@ -311,7 +317,15 @@ async def subscribe_camera(
                         timestamp_epoch=time.time(),
                         raw_data=props,
                     )
-                    sub.last_event = event
+                    # Count every event (including unknown) for visibility,
+                    # but only surface known kinds as last_event so the
+                    # Status tab doesn't fill up with topic noise like
+                    # Configuration/AudioEncoderConfiguration.
+                    sub.event_counts[event.kind] = (
+                        sub.event_counts.get(event.kind, 0) + 1
+                    )
+                    if event.kind != "unknown":
+                        sub.last_event = event
                     yield event
 
         except asyncio.CancelledError:

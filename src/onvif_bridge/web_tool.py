@@ -98,7 +98,7 @@ _INDEX_HTML = """<!doctype html>
  ol.steps li { margin-bottom:6px; }
  .cam-row { display:grid; grid-template-columns:2fr 1.4fr 1fr 1fr 1fr 1.2fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
  .cam-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
- .setup-row { display:grid; grid-template-columns:1.4fr 1fr 2.6fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
+ .setup-row { display:grid; grid-template-columns:1.4fr 1fr 0.6fr 2.4fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
  .setup-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
  pre#log-output { background:#111; border:1px solid #333; border-radius:4px; padding:10px; max-height:65vh; overflow:auto; font-size:12px; line-height:1.4; white-space:pre-wrap; word-break:break-all; margin:0; }
  .form-group { display:grid; grid-template-columns:140px 1fr; gap:8px; align-items:center; margin-bottom:10px; font-size:13px; }
@@ -115,6 +115,15 @@ _INDEX_HTML = """<!doctype html>
  .alert-err { background:#3b0000; border:1px solid #7f1d1d; color:#fca5a5; }
  .topic-list { display:flex; flex-wrap:wrap; gap:4px; }
  .topic-pill { background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:9px; font-size:11px; font-family:monospace; word-break:break-all; }
+ .topic-pill.kind-person { background:#1e3a5f; color:#9bf; }
+ .topic-pill.kind-vehicle { background:#0d3b2c; color:#6f6; }
+ .topic-pill.kind-line_crossing { background:#5f3a1e; color:#fa4; }
+ .topic-pill.kind-motion { background:#2a2a2a; color:#ddd; }
+ .topic-pill.kind-audio { background:#3b1e5f; color:#c8a; }
+ .topic-pill.kind-face { background:#3b2e1e; color:#f9c; }
+ .topic-pill.kind-unknown { background:#1e293b; color:#64748b; opacity:0.7; }
+ .topic-legend { font-size:11px; color:#94a3b8; margin-bottom:8px; }
+ .topic-legend .pill { font-size:10px; }
  .onvif-row { display:grid; grid-template-columns:1.5fr 1fr 1fr 3fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:start; word-break:break-word; }
  .onvif-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; align-items:center; }
  .cam-onvif-row { padding:10px 0; border-bottom:1px solid #2a2a2a; }
@@ -289,6 +298,17 @@ _INDEX_HTML = """<!doctype html>
       the fleet defaults above. Saving cancels the live subscription so it
       reconnects with the new credentials within ~60s.
     </p>
+    <div class="topic-legend">
+      Topic colours show how each ONVIF topic maps to an alarm kind:
+      <span class="pill kind-motion">motion</span>
+      <span class="pill kind-person">person</span>
+      <span class="pill kind-face">face</span>
+      <span class="pill kind-vehicle">vehicle</span>
+      <span class="pill kind-line_crossing">line_crossing</span>
+      <span class="pill kind-audio">audio</span>
+      <span class="pill kind-unknown">unknown</span>
+      (unknown topics are not pushed to Protect.)
+    </div>
     <div id="cam-onvif-block"><span class="empty">Loading…</span></div>
   </div>
 </div>
@@ -511,7 +531,8 @@ async function loadCamOnvif(){
     cams.forEach(function(c){
       var statCls=c.auth_locked?'err':(c.is_connected?'ok':'warn');
       var statTxt=c.auth_locked?'auth failed':(c.is_connected?'connected':(c.last_error?'error':'connecting…'));
-      var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
+      var classified=c.supported_topics_classified||c.supported_topics.map(function(t){return {topic:t,kind:'unknown'};});
+      var topics=classified.length?classified.map(function(o){return '<span class="topic-pill kind-'+esc(o.kind)+'" title="maps to '+esc(o.kind)+'">'+esc(o.topic)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
       var userPh=c.fleet_username?'fleet: '+esc(c.fleet_username):'(fleet creds unset)';
       var portPh=c.fleet_port||80;
       var retryBtn=c.auth_locked?'<button class="btn btn-sm cam-retry" style="background:#7f1d1d;color:#fca5a5;">Retry auth</button>':'';
@@ -575,13 +596,14 @@ async function refreshSetup(){
     document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
     var rows=data.rows||[];
     if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
-    var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
+    var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Events</span><span>Webhook ID</span><span>Status</span></div>';
     rows.forEach(function(r){
       var status,statusCls;
       if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
       else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
       else{status='not yet fired';statusCls='label';}
-      html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
+      var evCount=r.events_seen||0;
+      html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Events" title="Events of this kind seen since the bridge started">'+evCount+'</span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
     });html+='</div>';el.innerHTML=html;
     el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
   }catch(e){
@@ -899,6 +921,13 @@ class BridgeWebTool:
             pid = cam.get("protect_id", "")
             entry = overrides.get(pid, {})
             sub = subs.get(pid)
+            topics = (sub.supported_topics if sub else []) or []
+            # Pair each topic with the kind it classifies to so the UI
+            # can colour it. Helps users see at a glance which topics map
+            # to which alarm kind ("motion", "face", etc.).
+            classified = [
+                {"topic": t, "kind": classify_topic(t)} for t in topics
+            ]
             result.append({
                 "protect_id": pid,
                 "name": cam.get("name", ""),
@@ -911,7 +940,8 @@ class BridgeWebTool:
                 "is_connected": bool(sub and sub.is_connected),
                 "auth_locked": bool(sub and sub.auth_locked),
                 "last_error": sub.last_error if sub else "",
-                "supported_topics": (sub.supported_topics if sub else []) or [],
+                "supported_topics": topics,
+                "supported_topics_classified": classified,
             })
         return web.json_response(result)
 
@@ -1090,6 +1120,7 @@ class BridgeWebTool:
                     rendered_kinds = list(SUPPORTED_KINDS)
             else:
                 rendered_kinds = list(SUPPORTED_KINDS)
+            event_counts = sub.event_counts if sub else {}
             for kind in rendered_kinds:
                 wid = _format_webhook_id(template, protect_id, kind, name)
                 ws = wstats.get(wid)
@@ -1098,6 +1129,7 @@ class BridgeWebTool:
                     "camera_protect_id": protect_id,
                     "kind": kind,
                     "webhook_id": wid,
+                    "events_seen": int(event_counts.get(kind, 0)),
                     "fires_ok": ws.fires_ok if ws else 0,
                     "fires_failed": ws.fires_failed if ws else 0,
                     "last_fire_epoch": ws.last_fire_epoch if ws else 0,

@@ -149,9 +149,23 @@ class ProtectPusher:
         Skips event STOPs — they'd just double the trigger count for
         no benefit (Alarm Manager rules already model "for X seconds
         after trigger" so a single START is enough).
+        Skips events that didn't classify to a known kind — firing a
+        webhook with id ``onvif-bridge:<id>:unknown`` is never useful.
         """
-        self.stats.last_event = event
-        self.stats.last_event_epoch = time.time()
+        # Track every event so the per-kind counters in CameraSubscription
+        # stay accurate, but only feed last_event from a useful one.
+        if event.kind and event.kind != "unknown":
+            self.stats.last_event = event
+            self.stats.last_event_epoch = time.time()
+
+        if event.kind == "unknown":
+            outcome = PushOutcome(
+                ok=True, method="skipped",
+                message=f"unclassified topic {event.topic!r} — not pushed",
+            )
+            self.stats.last_outcome = outcome
+            self.stats.last_outcome_epoch = time.time()
+            return outcome
 
         if not event.is_active:
             outcome = PushOutcome(
