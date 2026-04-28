@@ -65,10 +65,10 @@ def identify_onvif_camera(cam: dict) -> bool:
     fields. `modelKey` is always "camera" for both natives and
     third-party — it does NOT discriminate.
 
-    Note: the integration API (`/proxy/protect/integration/v1/cameras`)
-    exposes a minimal schema that does NOT include
-    `isThirdPartyCamera`, so discovery must use the legacy endpoint
-    (cookie + CSRF auth, which UniFiProtectClient handles).
+    Both the legacy `/proxy/protect/api/cameras` endpoint and the modern
+    Integration API (`/proxy/protect/integration/v1/cameras`) include
+    `isThirdPartyCamera` in current Protect versions; the heuristic
+    fallbacks below cover older builds and minor schema differences.
     """
     if not isinstance(cam, dict):
         return False
@@ -113,13 +113,22 @@ async def discover_adopted_onvif_cameras(
 
     logger.info("Protect returned %d total camera record(s)", len(raw))
 
+    # Log the first camera's shape so users can see what fields are actually
+    # present (helps diagnose schema differences between legacy /api/cameras
+    # and the modern Integration API).
+    if raw and isinstance(raw[0], dict):
+        logger.info("Sample camera keys: %s", sorted(raw[0].keys())[:30])
+
     out: list[DiscoveredCamera] = []
     for cam in raw:
         if not isinstance(cam, dict):
             continue
         name = cam.get("name") or cam.get("id") or "?"
-        if not cam.get("isAdopted"):
-            logger.debug("Skipping %s — not adopted (isAdopted=%s)", name, cam.get("isAdopted"))
+        # Only filter out explicitly-not-adopted entries. The Integration API
+        # only ever returns adopted cameras and may omit the field entirely;
+        # treat missing as adopted to avoid filtering everything out.
+        if cam.get("isAdopted") is False:
+            logger.debug("Skipping %s — isAdopted=false", name)
             continue
         if not identify_onvif_camera(cam):
             logger.debug(
@@ -140,7 +149,7 @@ async def discover_adopted_onvif_cameras(
             model_key=cam.get("modelKey") or "",
             type=cam.get("type") or cam.get("displayName") or "",
             state=cam.get("state") or "",
-            is_adopted=True,
+            is_adopted=cam.get("isAdopted") is not False,
         ))
 
     if not out:

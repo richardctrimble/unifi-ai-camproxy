@@ -119,11 +119,27 @@ class UniFiProtectClient:
                         status=r.status,
                     )
                 # UDM / UNVR hands us the CSRF token in a response header.
+                # Newer firmware sometimes uses other casings / a TOKEN cookie.
                 self._csrf = (
                     r.headers.get("X-CSRF-Token")
                     or r.headers.get("x-csrf-token")
+                    or r.headers.get("X-Updated-CSRF-Token")
                 )
-                logger.info("Logged in to UniFi controller at %s", self.host)
+                cookies = list(r.cookies.keys()) if r.cookies else []
+                logger.info(
+                    "Logged in to UniFi controller at %s (csrf=%s, cookies=%s)",
+                    self.host,
+                    "captured" if self._csrf else "MISSING",
+                    cookies,
+                )
+                if not self._csrf:
+                    # Without CSRF, the legacy /proxy/protect/api/* endpoints
+                    # will return 401. Log every response header so users can
+                    # see exactly what the controller sent us.
+                    logger.warning(
+                        "No CSRF token in login response. Headers seen: %s",
+                        dict(r.headers),
+                    )
         except aiohttp.ClientError as e:
             raise UniFiAuthError(f"Could not reach {self.host}: {e}") from e
 
@@ -313,19 +329,22 @@ class UniFiProtectClient:
     async def list_cameras(self) -> list:
         """Return every camera Protect currently knows about.
 
-        Tries two endpoints in order:
-          1. ``GET /proxy/protect/api/cameras`` — direct list endpoint
-             (older Protect builds and most current ones).
-          2. ``GET /proxy/protect/api/bootstrap`` — canonical
-             "everything Protect knows" blob; cameras live at top-level
-             ``cameras`` or nested under ``nvr.cameras`` depending on
-             version. Used as a fallback because newer Protect builds
-             sometimes return [] or 404 from the direct endpoint.
+        Tries up to three endpoints, in order:
+          1. ``GET /proxy/protect/api/cameras`` — legacy direct list
+             endpoint (cookie + CSRF auth). Used by older Protect.
+          2. ``GET /proxy/protect/api/bootstrap`` — legacy "everything
+             Protect knows" blob; cameras at top-level ``cameras`` or
+             nested under ``nvr.cameras``.
+          3. ``GET /proxy/protect/integration/v1/cameras`` — modern
+             public Integration API (X-API-KEY auth). Works on Protect
+             3.x+ when the user has generated an API key in the Protect
+             web UI. Required on newer firmware where the legacy
+             endpoints return 401/500 even after a successful login.
 
         Logs every failure at INFO/WARNING so the user can see exactly
         what their controller returned without enabling DEBUG.
         """
-        # ── 1. Direct cameras endpoint ──────────────────────────────────
+        # ── 1. Legacy direct cameras endpoint ───────────────────────────
         url = f"{self.host}/proxy/protect/api/cameras"
         try:
             async with self._session.get(url, headers=self._headers()) as r:
@@ -336,8 +355,6 @@ class UniFiProtectClient:
                                     url, len(data))
                         if data:
                             return data
-                        # Empty list — fall through to bootstrap; some builds
-                        # return [] here even when cameras exist.
                     elif isinstance(data, dict):
                         for key in ("cameras", "data", "items", "results"):
                             if isinstance(data.get(key), list):
@@ -348,52 +365,93 @@ class UniFiProtectClient:
                                 break
                         else:
                             logger.warning(
-                                "list_cameras: %s returned dict with unexpected keys=%s — falling back to bootstrap",
+                                "list_cameras: %s returned dict with unexpected keys=%s — trying next endpoint",
                                 url, sorted(data.keys())[:15],
                             )
                     else:
-                        logger.warning("list_cameras: %s returned unexpected type %s — falling back to bootstrap",
+                        logger.warning("list_cameras: %s returned unexpected type %s — trying next endpoint",
                                        url, type(data).__name__)
                 else:
                     body = (await r.text())[:300]
                     logger.warning(
-                        "list_cameras: %s returned HTTP %s — falling back to bootstrap. Body: %s",
+                        "list_cameras: %s returned HTTP %s — trying next endpoint. Body: %s",
                         url, r.status, body,
                     )
         except Exception as e:  # noqa: BLE001
-            logger.warning("list_cameras: %s failed (%s) — falling back to bootstrap", url, e)
+            logger.warning("list_cameras: %s failed (%s) — trying next endpoint", url, e)
 
-        # ── 2. Bootstrap fallback ───────────────────────────────────────
+        # ── 2. Legacy bootstrap fallback ────────────────────────────────
         bs_url = f"{self.host}/proxy/protect/api/bootstrap"
         try:
             async with self._session.get(bs_url, headers=self._headers()) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    if isinstance(data, dict):
+                        cams = data.get("cameras")
+                        if isinstance(cams, list) and cams:
+                            logger.info("list_cameras: bootstrap returned %d cameras (top-level)", len(cams))
+                            return cams
+                        nvr = data.get("nvr") or {}
+                        cams = nvr.get("cameras") if isinstance(nvr, dict) else None
+                        if isinstance(cams, list) and cams:
+                            logger.info("list_cameras: bootstrap returned %d cameras (nvr.cameras)", len(cams))
+                            return cams
+                        logger.warning(
+                            "list_cameras: bootstrap had no cameras. Top-level keys=%s, nvr keys=%s — trying integration API",
+                            sorted(data.keys())[:15],
+                            sorted(nvr.keys())[:15] if isinstance(nvr, dict) else "(no nvr)",
+                        )
+                    else:
+                        logger.warning("list_cameras: bootstrap returned non-dict %s — trying integration API",
+                                       type(data).__name__)
+                else:
+                    body = (await r.text())[:300]
+                    logger.warning("list_cameras: bootstrap %s returned HTTP %s — trying integration API. Body: %s",
+                                   bs_url, r.status, body)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_cameras: bootstrap %s failed: %s — trying integration API", bs_url, e)
+
+        # ── 3. Integration API (modern Protect, requires X-API-KEY) ─────
+        if not self.api_key:
+            logger.warning(
+                "list_cameras: legacy endpoints failed and no api_key configured. "
+                "Generate an API key in Protect (Settings → System → Advanced → API) "
+                "and paste it into the UniFi tab to use the modern Integration API."
+            )
+            return []
+
+        int_url = f"{self.host}/proxy/protect/integration/v1/cameras"
+        # Integration API only wants the X-API-KEY header — strip cookie/CSRF noise.
+        int_headers = {"Accept": "application/json", "X-API-KEY": self.api_key}
+        try:
+            async with self._session.get(int_url, headers=int_headers) as r:
                 if r.status != 200:
                     body = (await r.text())[:300]
-                    logger.warning("list_cameras: bootstrap %s returned HTTP %s: %s",
-                                   bs_url, r.status, body)
+                    logger.warning(
+                        "list_cameras: integration API %s returned HTTP %s: %s",
+                        int_url, r.status, body,
+                    )
                     return []
                 data = await r.json(content_type=None)
-                if not isinstance(data, dict):
-                    logger.warning("list_cameras: bootstrap returned non-dict %s",
+                if isinstance(data, list):
+                    logger.info("list_cameras: integration API returned %d cameras", len(data))
+                    return data
+                if isinstance(data, dict):
+                    for key in ("cameras", "data", "items", "results"):
+                        if isinstance(data.get(key), list):
+                            logger.info("list_cameras: integration API returned %d cameras (dict[%s])",
+                                        len(data[key]), key)
+                            return data[key]
+                    logger.warning(
+                        "list_cameras: integration API returned dict with unexpected keys=%s",
+                        sorted(data.keys())[:15],
+                    )
+                else:
+                    logger.warning("list_cameras: integration API returned unexpected type %s",
                                    type(data).__name__)
-                    return []
-                cams = data.get("cameras")
-                if isinstance(cams, list) and cams:
-                    logger.info("list_cameras: bootstrap returned %d cameras (top-level)", len(cams))
-                    return cams
-                nvr = data.get("nvr") or {}
-                cams = nvr.get("cameras") if isinstance(nvr, dict) else None
-                if isinstance(cams, list) and cams:
-                    logger.info("list_cameras: bootstrap returned %d cameras (nvr.cameras)", len(cams))
-                    return cams
-                logger.warning(
-                    "list_cameras: bootstrap had no cameras. Top-level keys=%s, nvr keys=%s",
-                    sorted(data.keys())[:15],
-                    sorted(nvr.keys())[:15] if isinstance(nvr, dict) else "(no nvr)",
-                )
                 return []
         except Exception as e:  # noqa: BLE001
-            logger.warning("list_cameras: bootstrap %s failed: %s", bs_url, e)
+            logger.warning("list_cameras: integration API %s failed: %s", int_url, e)
             return []
 
     async def find_pending(self, mac: str) -> Optional[dict]:
