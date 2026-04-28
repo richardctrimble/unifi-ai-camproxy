@@ -196,43 +196,59 @@ _INDEX_HTML = """<!doctype html>
 <div id="unifi" class="pane">
   <div class="card">
     <div class="card-header"><h3>UniFi Protect — connection settings</h3></div>
+    <p style="font-size:13px;color:#bbb;margin:0 0 12px;">
+      The bridge needs <strong>two separate credentials</strong> against your Protect controller:
+    </p>
+    <ul style="font-size:13px;color:#bbb;margin:0 0 16px;padding-left:20px;line-height:1.6;">
+      <li><strong style="color:#9bf;">Username + Password</strong> → used to <em>discover</em> which ONVIF cameras are adopted in Protect (the "Get cameras from Protect" button)</li>
+      <li><strong style="color:#9bf;">API key</strong> → used to <em>fire webhooks</em> into Alarm Manager when ONVIF events arrive</li>
+    </ul>
     <div id="unifi-msg"></div>
+    <h4 style="margin:0 0 6px;color:#bbb;">Protect host</h4>
+    <p style="font-size:12px;color:#888;margin:0 0 8px;">Used by both auth methods below.</p>
     <div class="form-group">
-      <label>Protect host / IP</label>
+      <label>Host / IP</label>
       <input type="text" id="unifi-host" placeholder="192.168.1.1 or https://unifi.local" autocomplete="off">
     </div>
-    <h4 style="margin-top:18px;">Camera discovery login</h4>
-    <p style="font-size:12px;color:#888;margin:0 0 10px;">
-      UniFi OS account used to query Protect for adopted ONVIF cameras.
-      Must be a <strong style="color:#bbb;">UniFi OS account</strong> — not a Protect-app-only account.
-      Leave password blank to keep the existing saved value.
-    </p>
-    <div class="form-group">
-      <label>Username</label>
-      <input type="text" id="unifi-username" placeholder="admin" autocomplete="off">
+
+    <div style="border-top:1px solid #333;margin-top:18px;padding-top:14px;">
+      <h4 style="margin:0 0 4px;color:#9bf;">① Camera discovery login</h4>
+      <p style="font-size:12px;color:#888;margin:0 0 10px;">
+        Used by the <strong>Get cameras from Protect</strong> button to fetch the list of adopted ONVIF cameras.
+        Must be a <strong style="color:#bbb;">UniFi OS account</strong> — not a Protect-app-only account.
+        Leave password blank to keep the existing saved value.
+      </p>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="unifi-username" placeholder="admin" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="unifi-password" placeholder="(leave blank to keep existing)" autocomplete="new-password">
+      </div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button class="btn btn-ghost btn-sm" id="btn-test-userpass">Test login</button>
+        <span class="status-msg" id="test-userpass-result"></span>
+      </div>
     </div>
-    <div class="form-group">
-      <label>Password</label>
-      <input type="password" id="unifi-password" placeholder="(leave blank to keep existing)" autocomplete="new-password">
+
+    <div style="border-top:1px solid #333;margin-top:18px;padding-top:14px;">
+      <h4 style="margin:0 0 4px;color:#9bf;">② Alarm Manager API key</h4>
+      <p style="font-size:12px;color:#888;margin:0 0 10px;">
+        Used to fire <strong>webhooks into Alarm Manager</strong> when an ONVIF event arrives.
+        Generate in Protect → Settings → Control Plane → Integrations → Create API Key.
+        Leave blank to keep the existing saved value.
+      </p>
+      <div class="form-group">
+        <label>API key</label>
+        <input type="password" id="unifi-apikey" placeholder="(leave blank to keep existing)" autocomplete="new-password">
+      </div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button class="btn btn-ghost btn-sm" id="btn-test-apikey">Test API key</button>
+        <span class="status-msg" id="test-apikey-result"></span>
+      </div>
     </div>
-    <div class="btn-group" style="margin-top:8px;">
-      <button class="btn btn-ghost btn-sm" id="btn-test-userpass">Test login</button>
-      <span class="status-msg" id="test-userpass-result"></span>
-    </div>
-    <h4 style="margin-top:18px;">API key — Alarm Manager webhooks</h4>
-    <p style="font-size:12px;color:#888;margin:0 0 10px;">
-      Used to fire webhooks into Protect's Alarm Manager when ONVIF events arrive.
-      Generate in Protect → Settings → Control Plane → Integrations → Create API Key.
-      Leave blank to keep the existing saved value.
-    </p>
-    <div class="form-group">
-      <label>API key</label>
-      <input type="password" id="unifi-apikey" placeholder="(leave blank to keep existing)" autocomplete="new-password">
-    </div>
-    <div class="btn-group" style="margin-top:8px;">
-      <button class="btn btn-ghost btn-sm" id="btn-test-apikey">Test API key</button>
-      <span class="status-msg" id="test-apikey-result"></span>
-    </div>
+
     <div class="btn-group" style="margin-top:18px;border-top:1px solid #333;padding-top:14px;">
       <button class="btn" id="btn-save-unifi">Save</button>
       <span class="status-msg" id="save-unifi-result"></span>
@@ -715,13 +731,17 @@ class BridgeWebTool:
         except Exception:
             return web.json_response({"ok": False, "message": "invalid JSON"},
                                     status=400)
-        host = str(body.get("host", "")).strip()
-        username = str(body.get("username", "")).strip()
-        password = str(body.get("password", ""))
+        # Fall back to saved values when the form fields are blank (the form
+        # never pre-fills passwords, so "Test login" with no edits should
+        # test the saved credentials).
+        saved = self.config.get("unifi") or {}
+        host = str(body.get("host", "")).strip() or str(saved.get("host", "")).strip()
+        username = str(body.get("username", "")).strip() or str(saved.get("username", "")).strip()
+        password = str(body.get("password", "")) or str(saved.get("password", ""))
         if not host or not username or not password:
             return web.json_response({
                 "ok": False,
-                "message": "host, username, and password are required",
+                "message": "host, username, and password are required (and none saved)",
             })
         base = host if host.startswith("http") else f"https://{host}"
         try:
@@ -755,12 +775,13 @@ class BridgeWebTool:
         except Exception:
             return web.json_response({"ok": False, "message": "invalid JSON"},
                                     status=400)
-        host = str(body.get("host", "")).strip()
-        api_key = str(body.get("api_key", "")).strip()
+        saved = self.config.get("unifi") or {}
+        host = str(body.get("host", "")).strip() or str(saved.get("host", "")).strip()
+        api_key = str(body.get("api_key", "")).strip() or str(saved.get("api_key", "")).strip()
         if not host or not api_key:
             return web.json_response({
                 "ok": False,
-                "message": "host and api_key are required",
+                "message": "host and api_key are required (and none saved)",
             })
         base = host if host.startswith("http") else f"https://{host}"
         try:
