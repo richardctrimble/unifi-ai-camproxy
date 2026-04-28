@@ -340,7 +340,7 @@ async function refreshStatus(){
     var data=await resp.json();
     var b=data.build||{};var bridge=data.bridge||{};
     if(bridge.last_discovery_error){
-      banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
+      banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
     }else{banner.innerHTML='';}
     document.getElementById('bridge-grid').innerHTML=
       '<div class="row"><span class="label">Image variant</span><span><code>'+esc(data.variant||'onvif')+'</code></span></div>'+
@@ -351,7 +351,7 @@ async function refreshStatus(){
       '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
     var cams=data.cameras||[];var camsEl=document.getElementById('cams-block');
     if(!cams.length){
-      camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
+      camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
     }else{
       var html='<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
       cams.forEach(function(c){
