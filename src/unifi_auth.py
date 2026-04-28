@@ -73,7 +73,13 @@ class UniFiProtectClient:
         # UniFi ships self-signed certs on the local controller. That's fine
         # for a machine sat on the same LAN.
         connector = aiohttp.TCPConnector(ssl=False)
-        self._session = aiohttp.ClientSession(connector=connector)
+        # 15s total request timeout — Protect on a healthy LAN responds in
+        # well under a second; anything slower is almost always a wrong
+        # host, an unreachable controller, or a bad credential triggering
+        # a long retry path. Without this, aiohttp's default is effectively
+        # forever and the discover button hangs.
+        timeout = aiohttp.ClientTimeout(total=15, connect=5)
+        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         try:
             # Always log in when we have username + password. The legacy
             # /proxy/protect/api/* endpoints (notably manage-payload) only

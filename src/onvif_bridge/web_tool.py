@@ -318,7 +318,7 @@ _INDEX_HTML = """<!doctype html>
   <div class="card">
     <div class="card-header">
       <h3>Container logs</h3>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div class="btn-group">
         <label style="margin:0;">Lines:
           <select id="log-lines" style="margin-left:4px;">
             <option value="200">200</option>
@@ -328,6 +328,8 @@ _INDEX_HTML = """<!doctype html>
         </label>
         <label style="margin:0;"><input type="checkbox" id="log-auto"> Auto-refresh (3s)</label>
         <button class="btn btn-ghost btn-sm" id="log-refresh">Refresh</button>
+        <button class="btn btn-ghost btn-sm" id="log-clear" style="color:#fca5a5;">Clear logs</button>
+        <span class="status-msg" id="log-clear-msg"></span>
       </div>
     </div>
     <pre id="log-output">Loading…</pre>
@@ -363,10 +365,25 @@ async function refreshStatus(){
     var data=await resp.json();
     var b=data.build||{};var bridge=data.bridge||{};
     var btn=document.getElementById('btn-discover');
+    var dmsg=document.getElementById('discover-msg');
     if(data.is_discovering){
       btn.disabled=true;btn.textContent='Discovering…';
+      window.__wasDiscovering=true;
     }else{
       btn.disabled=false;btn.textContent='Get cameras from Protect';
+      // Just-completed: replace "Querying…" with the actual result.
+      if(window.__wasDiscovering){
+        window.__wasDiscovering=false;
+        if(bridge.last_discovery_error){
+          dmsg.className='status-msg err';
+          dmsg.textContent='Failed: '+bridge.last_discovery_error;
+        }else{
+          var n=(data.cameras||[]).length;
+          dmsg.className='status-msg ok';
+          dmsg.textContent='Found '+n+' camera'+(n===1?'':'s')+'.';
+          setTimeout(function(){if(dmsg.textContent.indexOf('Found ')===0)dmsg.textContent='';},5000);
+        }
+      }
     }
     if(bridge.last_discovery_error){
       banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
@@ -574,6 +591,19 @@ document.getElementById('log-refresh').addEventListener('click',refreshLogs);
 var logTimer;
 document.getElementById('log-auto').addEventListener('change',function(e){clearInterval(logTimer);if(e.target.checked)logTimer=setInterval(refreshLogs,3000);});
 
+document.getElementById('log-clear').addEventListener('click',async function(){
+  if(!confirm('Truncate the bridge log file? This deletes all log history.'))return;
+  var msg=document.getElementById('log-clear-msg');
+  msg.className='status-msg ok';msg.textContent='Clearing…';
+  try{
+    var r=await(await fetch('/api/logs',{method:'DELETE'})).json();
+    msg.className='status-msg '+(r.ok?'ok':'err');
+    msg.textContent=r.message||'';
+    if(r.ok)refreshLogs();
+    setTimeout(function(){msg.textContent='';},3000);
+  }catch(e){msg.className='status-msg err';msg.textContent='Failed: '+e;}
+});
+
 async function triggerDiscover(){
   var btn=document.getElementById('btn-discover');
   var msg=document.getElementById('discover-msg');
@@ -615,6 +645,7 @@ class BridgeWebTool:
         self.app.router.add_get("/api/status", self._status)
         self.app.router.add_get("/api/setup", self._setup)
         self.app.router.add_get("/api/logs", self._logs)
+        self.app.router.add_delete("/api/logs", self._clear_logs)
         self.app.router.add_post("/api/discover", self._post_discover)
         self.app.router.add_post("/api/cameras/onvif/retry", self._post_camera_retry)
         self.app.router.add_get("/api/cameras/topics", self._camera_topics)
@@ -1073,6 +1104,21 @@ class BridgeWebTool:
                               content_type="text/plain")
         redacted = "".join(_RTSP_PWD_RE.sub(r"\1***\3", line) for line in tail)
         return web.Response(text=redacted, content_type="text/plain")
+
+    async def _clear_logs(self, _: web.Request) -> web.Response:
+        log_path = Path("/config/camproxy.log")
+        if not log_path.exists():
+            return web.json_response({"ok": True, "message": "No log file."})
+        try:
+            # Truncate in place so any open file handle (the running logger)
+            # keeps writing into the same inode without errors.
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.truncate(0)
+        except OSError as exc:
+            return web.json_response({"ok": False,
+                                      "message": f"Could not clear log: {exc}"})
+        logger.info("Log file cleared via web UI")
+        return web.json_response({"ok": True, "message": "Logs cleared."})
 
     async def run(self, port: int) -> None:
         runner = web.AppRunner(self.app, access_log=None)
