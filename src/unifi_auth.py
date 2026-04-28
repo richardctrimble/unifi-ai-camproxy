@@ -311,21 +311,89 @@ class UniFiProtectClient:
     # ─── Auto-adoption ──────────────────────────────────────────────────────
 
     async def list_cameras(self) -> list:
-        """Return every camera Protect currently knows about."""
+        """Return every camera Protect currently knows about.
+
+        Tries two endpoints in order:
+          1. ``GET /proxy/protect/api/cameras`` — direct list endpoint
+             (older Protect builds and most current ones).
+          2. ``GET /proxy/protect/api/bootstrap`` — canonical
+             "everything Protect knows" blob; cameras live at top-level
+             ``cameras`` or nested under ``nvr.cameras`` depending on
+             version. Used as a fallback because newer Protect builds
+             sometimes return [] or 404 from the direct endpoint.
+
+        Logs every failure at INFO/WARNING so the user can see exactly
+        what their controller returned without enabling DEBUG.
+        """
+        # ── 1. Direct cameras endpoint ──────────────────────────────────
         url = f"{self.host}/proxy/protect/api/cameras"
         try:
             async with self._session.get(url, headers=self._headers()) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    if isinstance(data, list):
+                        logger.info("list_cameras: %s returned %d entries",
+                                    url, len(data))
+                        if data:
+                            return data
+                        # Empty list — fall through to bootstrap; some builds
+                        # return [] here even when cameras exist.
+                    elif isinstance(data, dict):
+                        for key in ("cameras", "data", "items", "results"):
+                            if isinstance(data.get(key), list):
+                                logger.info("list_cameras: %s returned %d entries (dict[%s])",
+                                            url, len(data[key]), key)
+                                if data[key]:
+                                    return data[key]
+                                break
+                        else:
+                            logger.warning(
+                                "list_cameras: %s returned dict with unexpected keys=%s — falling back to bootstrap",
+                                url, sorted(data.keys())[:15],
+                            )
+                    else:
+                        logger.warning("list_cameras: %s returned unexpected type %s — falling back to bootstrap",
+                                       url, type(data).__name__)
+                else:
+                    body = (await r.text())[:300]
+                    logger.warning(
+                        "list_cameras: %s returned HTTP %s — falling back to bootstrap. Body: %s",
+                        url, r.status, body,
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_cameras: %s failed (%s) — falling back to bootstrap", url, e)
+
+        # ── 2. Bootstrap fallback ───────────────────────────────────────
+        bs_url = f"{self.host}/proxy/protect/api/bootstrap"
+        try:
+            async with self._session.get(bs_url, headers=self._headers()) as r:
                 if r.status != 200:
-                    logger.debug("list_cameras returned %s", r.status)
+                    body = (await r.text())[:300]
+                    logger.warning("list_cameras: bootstrap %s returned HTTP %s: %s",
+                                   bs_url, r.status, body)
                     return []
                 data = await r.json(content_type=None)
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict) and "cameras" in data:
-                    return data["cameras"]
+                if not isinstance(data, dict):
+                    logger.warning("list_cameras: bootstrap returned non-dict %s",
+                                   type(data).__name__)
+                    return []
+                cams = data.get("cameras")
+                if isinstance(cams, list) and cams:
+                    logger.info("list_cameras: bootstrap returned %d cameras (top-level)", len(cams))
+                    return cams
+                nvr = data.get("nvr") or {}
+                cams = nvr.get("cameras") if isinstance(nvr, dict) else None
+                if isinstance(cams, list) and cams:
+                    logger.info("list_cameras: bootstrap returned %d cameras (nvr.cameras)", len(cams))
+                    return cams
+                logger.warning(
+                    "list_cameras: bootstrap had no cameras. Top-level keys=%s, nvr keys=%s",
+                    sorted(data.keys())[:15],
+                    sorted(nvr.keys())[:15] if isinstance(nvr, dict) else "(no nvr)",
+                )
                 return []
-        except Exception as e:
-            logger.debug("list_cameras failed: %s", e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_cameras: bootstrap %s failed: %s", bs_url, e)
             return []
 
     async def find_pending(self, mac: str) -> Optional[dict]:
