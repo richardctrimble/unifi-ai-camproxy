@@ -79,7 +79,16 @@ class UniFiProtectClient:
         # a long retry path. Without this, aiohttp's default is effectively
         # forever and the discover button hangs.
         timeout = aiohttp.ClientTimeout(total=15, connect=5)
-        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        # unsafe=True is required for IP-address hosts: aiohttp's default
+        # CookieJar treats IP addresses as "unsafe" and silently drops any
+        # cookies (including the UniFi TOKEN session cookie) when sending
+        # subsequent requests. Without this the login succeeds but every
+        # follow-up call to /proxy/protect/api/* gets a 401 because the
+        # session cookie was never attached.
+        cookie_jar = aiohttp.CookieJar(unsafe=True)
+        self._session = aiohttp.ClientSession(
+            connector=connector, timeout=timeout, cookie_jar=cookie_jar,
+        )
         try:
             # Always log in when we have username + password. The legacy
             # /proxy/protect/api/* endpoints (notably manage-payload) only
