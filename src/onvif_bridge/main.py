@@ -313,6 +313,10 @@ async def main() -> None:
             state_provider = lambda: {  # noqa: E731 — short enough
                 "discovered_cameras": discovered_cameras,
                 "subscriptions": subscriptions,
+                # Exposed so the web UI can cancel a subscription after a
+                # cred change and let _reconcile re-create it with fresh
+                # creds on the next pass.
+                "subscription_tasks": subscription_tasks,
                 "pusher_stats": pusher.stats,
                 "last_discovery_error": last_discovery_error,
                 "last_discovery_epoch": last_discovery_epoch,

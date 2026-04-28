@@ -115,6 +115,22 @@ _INDEX_HTML = """<!doctype html>
  .topic-pill { background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:9px; font-size:11px; font-family:monospace; word-break:break-all; }
  .onvif-row { display:grid; grid-template-columns:1.5fr 1fr 1fr 3fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:start; word-break:break-word; }
  .onvif-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; align-items:center; }
+ .cam-onvif-row { padding:10px 0; border-bottom:1px solid #2a2a2a; }
+ .cam-onvif-row:last-child { border-bottom:0; }
+ .cam-onvif-head { display:flex; flex-wrap:wrap; gap:10px; align-items:baseline; margin-bottom:6px; }
+ .cam-onvif-head .cam-name { font-weight:600; font-size:14px; }
+ .cam-onvif-head .cam-host { color:#888; font-size:12px; }
+ .cam-onvif-head .cam-status { font-size:11px; padding:2px 8px; border-radius:9px; }
+ .cam-onvif-head .cam-status.ok { background:#0d3b2c; color:#6f6; }
+ .cam-onvif-head .cam-status.warn { background:#3b2a0d; color:#fa4; }
+ .cam-onvif-fields { display:grid; grid-template-columns:1.5fr 1.5fr 0.7fr auto; gap:8px; align-items:center; }
+ .cam-onvif-fields input { background:#111; border:1px solid #444; color:#ddd; padding:5px 8px; border-radius:3px; font-size:12px; min-width:0; width:100%; }
+ .cam-onvif-fields input:focus { outline:none; border-color:#3b82f6; }
+ .cam-onvif-fields input::placeholder { color:#555; font-style:italic; }
+ .cam-onvif-topics { margin-top:6px; font-size:11px; }
+ @media (max-width: 560px) {
+   .cam-onvif-fields { grid-template-columns:1fr; }
+ }
  .status-msg { font-size:12px; }
  .status-msg.ok { color:#4c4; }
  .status-msg.err { color:#f87; }
@@ -242,12 +258,13 @@ _INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div class="card">
-    <div class="card-header"><h3>Camera ONVIF topics (live)</h3></div>
+    <div class="card-header"><h3>Per-camera ONVIF credentials</h3></div>
     <p style="font-size:12px;color:#888;margin:0 0 10px;">
-      Topics your cameras advertised via <code>GetEventProperties</code>.
-      Populates after a successful ONVIF subscription.
+      Override fleet creds for individual cameras. Leave a row blank to inherit
+      the fleet defaults above. Saving cancels the live subscription so it
+      reconnects with the new credentials within ~60s.
     </p>
-    <div id="topics-block"><span class="empty">Loading…</span></div>
+    <div id="cam-onvif-block"><span class="empty">Loading…</span></div>
   </div>
 </div>
 
@@ -307,7 +324,7 @@ document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click'
   document.getElementById(t.dataset.pane).classList.add('active');
   if(t.dataset.pane==='logs')refreshLogs();
   if(t.dataset.pane==='setup')refreshSetup();
-  if(t.dataset.pane==='onvif'){loadOnvif();loadTopics();}
+  if(t.dataset.pane==='onvif'){loadOnvif();loadCamOnvif();}
   if(t.dataset.pane==='unifi')loadUnifi();
 });});
 
@@ -395,16 +412,49 @@ document.getElementById('btn-save-onvif').addEventListener('click',async functio
   try{var r=await(await fetch('/api/config/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:user,password:pass,port})})).json();setMsg('save-onvif-result',r.ok,r.message);}catch(e){setMsg('save-onvif-result',false,'Save failed: '+e);}
 });
 
-async function loadTopics(){try{
-  var cams=await(await fetch('/api/cameras/topics')).json();
-  var el=document.getElementById('topics-block');
-  if(!cams.length){el.innerHTML='<span class="empty">No active subscriptions yet — connect a camera first.</span>';return;}
-  var html='<div class="table-scroll"><div class="onvif-row header"><span>Camera</span><span>IP</span><span>Status</span><span>Advertised ONVIF topics</span></div>';
+async function loadCamOnvif(){try{
+  var cams=await(await fetch('/api/cameras/onvif')).json();
+  var el=document.getElementById('cam-onvif-block');
+  if(!cams.length){el.innerHTML='<span class="empty">No cameras discovered yet — populates after the first successful Protect discovery.</span>';return;}
+  var html='';
   cams.forEach(function(c){
-    var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':'connecting…';
-    var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">none advertised</span>';
-    html+='<div class="onvif-row"><span data-label="Camera">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host)+'</code></span><span data-label="Status" class="'+statCls+'">'+statTxt+'</span><span data-label="Topics"><div class="topic-list">'+topics+'</div></span></div>';
-  });html+='</div>';el.innerHTML=html;
+    var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':(c.last_error?'error':'connecting…');
+    var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
+    var userPh=c.fleet_username?'fleet: '+esc(c.fleet_username):'(fleet creds unset)';
+    var portPh=c.fleet_port||80;
+    html+='<div class="cam-onvif-row" data-pid="'+esc(c.protect_id)+'">'
+      +'<div class="cam-onvif-head">'
+      +'<span class="cam-name">'+esc(c.name)+'</span>'
+      +'<span class="cam-host"><code>'+esc(c.host||'?')+'</code></span>'
+      +'<span class="cam-status '+statCls+'">'+esc(statTxt)+'</span>'
+      +'</div>'
+      +'<div class="cam-onvif-fields">'
+      +'<input type="text" class="cam-user" value="'+esc(c.override_username||'')+'" placeholder="'+userPh+'" autocomplete="off">'
+      +'<input type="password" class="cam-pass" value="'+esc(c.override_password||'')+'" placeholder="(inherit fleet password)" autocomplete="new-password">'
+      +'<input type="text" class="cam-port" value="'+esc(c.override_port||'')+'" placeholder="'+portPh+'">'
+      +'<button class="btn btn-sm cam-save">Save</button>'
+      +'</div>'
+      +'<div class="cam-onvif-topics"><div class="topic-list">'+topics+'</div></div>'
+      +'<div class="status-msg cam-msg" style="margin-top:4px;"></div>'
+      +'</div>';
+  });el.innerHTML=html;
+  el.querySelectorAll('.cam-onvif-row').forEach(function(row){
+    var btn=row.querySelector('.cam-save');
+    btn.addEventListener('click',async function(){
+      var pid=row.dataset.pid;
+      var user=row.querySelector('.cam-user').value.trim();
+      var pass=row.querySelector('.cam-pass').value;
+      var portRaw=row.querySelector('.cam-port').value.trim();
+      var port=portRaw?parseInt(portRaw):0;
+      var msg=row.querySelector('.cam-msg');
+      msg.className='status-msg cam-msg ok';msg.textContent='Saving…';
+      try{
+        var r=await(await fetch('/api/cameras/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({protect_id:pid,username:user,password:pass,port:port})})).json();
+        msg.className='status-msg cam-msg '+(r.ok?'ok':'err');
+        msg.textContent=r.message||(r.ok?'Saved':'Failed');
+      }catch(e){msg.className='status-msg cam-msg err';msg.textContent='Save failed: '+e;}
+    });
+  });
 }catch(e){}}
 
 async function refreshSetup(){try{
@@ -432,6 +482,12 @@ document.getElementById('log-auto').addEventListener('change',function(e){clearI
 refreshStatus();
 setInterval(refreshStatus,3000);
 setInterval(function(){if(document.querySelector('[data-pane="setup"].active'))refreshSetup();},5000);
+setInterval(function(){
+  if(!document.querySelector('[data-pane="onvif"].active'))return;
+  var ae=document.activeElement;
+  if(ae&&document.getElementById('cam-onvif-block').contains(ae))return;
+  loadCamOnvif();
+},5000);
 </script></body></html>"""
 
 
@@ -448,6 +504,8 @@ class BridgeWebTool:
         self.app.router.add_get("/api/setup", self._setup)
         self.app.router.add_get("/api/logs", self._logs)
         self.app.router.add_get("/api/cameras/topics", self._camera_topics)
+        self.app.router.add_get("/api/cameras/onvif", self._get_camera_onvif)
+        self.app.router.add_post("/api/cameras/onvif", self._post_camera_onvif)
         self.app.router.add_get("/api/config/unifi", self._get_unifi)
         self.app.router.add_post("/api/config/unifi", self._post_unifi)
         self.app.router.add_get("/api/config/onvif", self._get_onvif)
@@ -522,9 +580,26 @@ class BridgeWebTool:
             self._save_config()
         except RuntimeError as exc:
             return web.json_response({"ok": False, "message": str(exc)})
+
+        # Cancel subscriptions for cameras that don't have their own
+        # override — they're using the fleet creds we just changed.
+        overrides = self._camera_overrides_map()
+        affected = [
+            pid for pid in (self._state_provider().get("subscription_tasks") or {})
+            if not (
+                overrides.get(pid, {}).get("onvif_username")
+                and overrides.get(pid, {}).get("onvif_password")
+            )
+        ]
+        self._cancel_subscriptions(affected)
+
         return web.json_response({
             "ok": True,
-            "message": "Saved. New ONVIF creds will apply to newly discovered cameras.",
+            "message": (
+                f"Saved. Resubscribing {len(affected)} camera(s) with new fleet creds…"
+                if affected else
+                "Saved. Will apply to newly discovered cameras."
+            ),
         })
 
     async def _test_userpass(self, request: web.Request) -> web.Response:
@@ -624,6 +699,120 @@ class BridgeWebTool:
                 "supported_topics": sub.supported_topics or [],
             })
         return web.json_response(result)
+
+    def _camera_overrides_map(self) -> Dict[str, dict]:
+        """Index cfg['cameras'] entries by protect_id."""
+        out: Dict[str, dict] = {}
+        for entry in self.config.get("cameras") or []:
+            if isinstance(entry, dict) and entry.get("protect_id"):
+                out[entry["protect_id"]] = entry
+        return out
+
+    def _cancel_subscriptions(self, protect_ids) -> None:
+        """Cancel running subscriptions so _reconcile will re-create them
+        on the next discovery cycle with the new credentials.
+
+        Pass None to cancel all (used when fleet creds change).
+        """
+        state = self._state_provider()
+        tasks = state.get("subscription_tasks") or {}
+        subs = state.get("subscriptions") or {}
+        targets = list(tasks.keys()) if protect_ids is None else list(protect_ids)
+        for pid in targets:
+            task = tasks.get(pid)
+            if task is not None:
+                task.cancel()
+                tasks.pop(pid, None)
+            subs.pop(pid, None)
+
+    async def _get_camera_onvif(self, _: web.Request) -> web.Response:
+        state = self._state_provider()
+        cams = state.get("discovered_cameras") or []
+        subs = state.get("subscriptions") or {}
+        overrides = self._camera_overrides_map()
+        fleet = self.config.get("onvif") or {}
+        result = []
+        for cam in cams:
+            pid = cam.get("protect_id", "")
+            entry = overrides.get(pid, {})
+            sub = subs.get(pid)
+            result.append({
+                "protect_id": pid,
+                "name": cam.get("name", ""),
+                "host": cam.get("host", ""),
+                "override_username": entry.get("onvif_username", "") or "",
+                "override_password": entry.get("onvif_password", "") or "",
+                "override_port": entry.get("onvif_port") if entry.get("onvif_port") else None,
+                "fleet_username": fleet.get("username", ""),
+                "fleet_port": int(fleet.get("port", 80)),
+                "is_connected": bool(sub and sub.is_connected),
+                "last_error": sub.last_error if sub else "",
+                "supported_topics": (sub.supported_topics if sub else []) or [],
+            })
+        return web.json_response(result)
+
+    async def _post_camera_onvif(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        pid = str(body.get("protect_id", "")).strip()
+        if not pid:
+            return web.json_response({"ok": False, "message": "protect_id required"})
+        username = str(body.get("username", "")).strip()
+        password = str(body.get("password", ""))
+        port_raw = body.get("port")
+
+        cams = self.config.setdefault("cameras", [])
+        if not isinstance(cams, list):
+            self.config["cameras"] = cams = []
+
+        entry = None
+        for e in cams:
+            if isinstance(e, dict) and e.get("protect_id") == pid:
+                entry = e
+                break
+        if entry is None:
+            entry = {"protect_id": pid}
+            cams.append(entry)
+
+        # Empty username + password = clear override (revert to fleet).
+        if username:
+            entry["onvif_username"] = username
+        else:
+            entry.pop("onvif_username", None)
+        if password:
+            entry["onvif_password"] = password
+        else:
+            entry.pop("onvif_password", None)
+        try:
+            port_int = int(port_raw) if port_raw not in (None, "", 0) else 0
+        except (TypeError, ValueError):
+            port_int = 0
+        if port_int > 0:
+            entry["onvif_port"] = port_int
+        else:
+            entry.pop("onvif_port", None)
+
+        # If the entry has nothing left except protect_id, drop it so
+        # the file stays tidy.
+        if list(entry.keys()) == ["protect_id"]:
+            cams.remove(entry)
+
+        try:
+            self._save_config()
+        except RuntimeError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+
+        # Cancel the live subscription for this camera so the discovery
+        # loop re-creates it with the new credentials.
+        self._cancel_subscriptions([pid])
+
+        return web.json_response({
+            "ok": True,
+            "message": "Saved. Resubscribing with new credentials…",
+        })
 
     async def _status(self, _: web.Request) -> web.Response:
         state = self._state_provider()
