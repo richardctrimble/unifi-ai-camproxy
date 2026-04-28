@@ -18,8 +18,11 @@ Logic:
   4. Otherwise -> crash with a helpful message.
 
 Mode dispatch:
-  - APP_IMAGE_VARIANT=onvif (default) -> exec `python -m onvif_bridge.main`
-  - APP_IMAGE_VARIANT=full            -> exec `python main.py /config/config.yml`
+  - APP_IMAGE_VARIANT=onvif (default)  -> exec `python -m onvif_bridge.main`
+  - APP_IMAGE_VARIANT=full             -> exec `python main.py /config/config.yml`
+  - APP_IMAGE_VARIANT=detect           -> exec `python -m detect.main`
+  - APP_IMAGE_VARIANT=detect-cuda      -> exec `python -m detect.main`
+  - APP_IMAGE_VARIANT=lines            -> exec `python -m lines.main`
 
 Environment variables (all optional if config.yml exists):
   UNIFI_HOST, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_TOKEN, UNIFI_API_KEY
@@ -205,7 +208,12 @@ def main():
     variant = os.environ.get("APP_IMAGE_VARIANT", "onvif").lower()
     if variant == "full":
         os.execvp(sys.executable, [sys.executable, "main.py", str(CONFIG_PATH)])
+    elif variant in ("detect", "detect-cuda"):
+        os.execvp(sys.executable, [sys.executable, "-m", "detect.main"])
+    elif variant == "lines":
+        os.execvp(sys.executable, [sys.executable, "-m", "lines.main"])
     else:
+        # Default: ONVIF bridge (variant == "onvif" or unrecognised)
         os.execvp(sys.executable, [sys.executable, "-m", "onvif_bridge.main"])
 
 

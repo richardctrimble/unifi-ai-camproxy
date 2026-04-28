@@ -1,0 +1,15 @@
+version: "3.8"
+
+# Layer this on top of docker-compose.yml to build/run the line-crossing image.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lines.yml up -d --build
+#
+# Person and vehicle detection PLUS virtual line-crossing zones.
+# Draw crossing lines in the web UI → Lines tab.
+# For detection only (no line-crossing) use docker-compose.detect.yml instead.
+
+services:
+  unifi-ai-camproxy:
+    build:
+      dockerfile: Dockerfile.lines
+    image: unifi-ai-camproxy:lines

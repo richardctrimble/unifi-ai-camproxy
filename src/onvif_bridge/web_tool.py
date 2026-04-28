@@ -1,21 +1,21 @@
 """
 web_tool — aiohttp UI for the ONVIF bridge.
 
-Three tabs:
+Five tabs:
 
   * **Status** — discovered cameras, per-camera subscription state,
-    last event, push counters.
-  * **Setup**  — per-(camera, kind) webhook IDs with copy buttons
-    and live "is this rule firing?" indicators. Walks the user
-    through creating Alarm Manager rules in Protect — the only
-    piece of the flow that has to be done manually because Protect's
-    integration API doesn't expose alarm-rule CRUD.
-  * **Logs**   — tail of /config/camproxy.log with RTSP password
-    redaction.
+    last event, push counters, discovery error banner.
+  * **UniFi Creds** — Protect host, username + password (with test button),
+    API key (with test button), save to config.yml.
+  * **ONVIF Creds** — fleet ONVIF username + password + port, per-camera
+    supported topics (live from subscriptions).
+  * **Alarm Setup** — per-(camera, kind) webhook IDs with copy buttons
+    and live firing status. Guides user through creating Alarm Manager
+    rules in Protect (the only manual part).
+  * **Logs** — tail of /config/camproxy.log with password redaction.
 
-The UI deliberately mirrors the full image's dashboard layout (same
-port 8091, dark theme, status-grid styling) so users moving between
-the two images see something familiar.
+Config writes use mutate-in-place (self.config.clear(); self.config.update(...))
+so the dict shared with main.py's discovery loop picks up changes immediately.
 """
 
 from __future__ import annotations
@@ -27,19 +27,31 @@ import time
 from pathlib import Path
 from typing import Callable, Dict
 
+import aiohttp
+import yaml
 from aiohttp import web
 
 from build_info import get_build_info
 
 logger = logging.getLogger("onvif_bridge.web")
 
+CONFIG_PATH = Path("/config/config.yml")
 
-# Kinds we emit from onvif_subscriber.classify_topic. The Setup tab
-# enumerates a row per (camera, kind) so the user knows every webhook
-# id the bridge might fire — even if their camera doesn't currently
-# emit one (e.g. a camera with no AI emits only `motion`, but a rule
-# for `:person` is harmless to leave configured for later upgrades).
 SUPPORTED_KINDS = ["person", "vehicle", "line_crossing", "motion", "audio"]
+DEFAULT_WEBHOOK_TEMPLATE = "onvif-bridge:{protect_id}:{kind}"
+
+_RTSP_PWD_RE = re.compile(r"(rtsp://[^:]+:)([^@]+)(@)")
+
+
+def _format_webhook_id(template: str, protect_id: str, kind: str,
+                       name: str) -> str:
+    """Apply the user's template; fall back to the default on KeyError."""
+    try:
+        return template.format(protect_id=protect_id, kind=kind, name=name)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_WEBHOOK_TEMPLATE.format(
+            protect_id=protect_id, kind=kind, name=name,
+        )
 
 
 _INDEX_HTML = """<!doctype html>
@@ -84,15 +96,37 @@ _INDEX_HTML = """<!doctype html>
  .setup-row { display:grid; grid-template-columns:1.4fr 1fr 2.6fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; }
  .setup-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
  pre#log-output { background:#111; border:1px solid #333; border-radius:4px; padding:10px; max-height:65vh; overflow:auto; font-size:12px; line-height:1.4; white-space:pre-wrap; word-break:break-all; margin:0; }
+ .form-group { display:grid; grid-template-columns:140px 1fr; gap:8px; align-items:center; margin-bottom:10px; font-size:13px; }
+ .form-group label { color:#bbb; text-align:right; }
+ .form-group input { background:#111; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:4px; font-size:13px; }
+ .form-group input:focus { outline:none; border-color:#3b82f6; }
+ .btn { background:#3b82f6; border:0; color:#fff; padding:7px 14px; border-radius:4px; cursor:pointer; font-size:13px; }
+ .btn:hover { background:#2563eb; }
+ .btn-ghost { background:#333; color:#ddd; }
+ .btn-ghost:hover { background:#444; }
+ .btn-sm { padding:4px 10px; font-size:12px; }
+ .btn-group { display:flex; gap:8px; align-items:center; }
+ .alert { padding:10px 14px; border-radius:4px; font-size:13px; margin-bottom:12px; }
+ .alert-err { background:#3b0000; border:1px solid #7f1d1d; color:#fca5a5; }
+ .topic-list { display:flex; flex-wrap:wrap; gap:4px; }
+ .topic-pill { background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:9px; font-size:11px; font-family:monospace; }
+ .onvif-row { display:grid; grid-template-columns:1.5fr 1fr 1fr 3fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:start; }
+ .onvif-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; align-items:center; }
+ .status-msg { font-size:12px; }
+ .status-msg.ok { color:#4c4; }
+ .status-msg.err { color:#f87; }
 </style></head><body>
 <h1>unifi-ai-camproxy / ONVIF bridge</h1>
 <div class="tabs">
   <button class="tab active" data-pane="status">Status</button>
-  <button class="tab" data-pane="setup">Setup</button>
+  <button class="tab" data-pane="unifi">UniFi Creds</button>
+  <button class="tab" data-pane="onvif">ONVIF Creds</button>
+  <button class="tab" data-pane="setup">Alarm Setup</button>
   <button class="tab" data-pane="logs">Logs</button>
 </div>
 
 <div id="status" class="pane active">
+  <div id="status-error-banner"></div>
   <div class="card">
     <div class="card-header"><h3>Bridge</h3></div>
     <div class="grid" id="bridge-grid"></div>
@@ -107,28 +141,102 @@ _INDEX_HTML = """<!doctype html>
   </div>
 </div>
 
+<div id="unifi" class="pane">
+  <div class="card">
+    <div class="card-header"><h3>UniFi Protect — connection settings</h3></div>
+    <p style="font-size:13px;color:#bbb;margin:0 0 14px;">
+      The bridge connects to Protect in two ways: (1) discovers ONVIF cameras via
+      username+password; (2) fires Alarm Manager webhooks via API key.
+      Changes are saved to <code>/config/config.yml</code>.
+    </p>
+    <div id="unifi-msg"></div>
+    <h4>Host</h4>
+    <div class="form-group">
+      <label>Protect host / IP</label>
+      <input type="text" id="unifi-host" placeholder="192.168.2.1 or https://unifi.local">
+    </div>
+    <h4>Discovery login (username + password)</h4>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="unifi-username" placeholder="admin" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="unifi-password" placeholder="password" autocomplete="current-password">
+    </div>
+    <div class="btn-group" style="margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" id="btn-test-userpass">Test login</button>
+      <span class="status-msg" id="test-userpass-result"></span>
+    </div>
+    <h4 style="margin-top:18px;">API key (Alarm Manager webhooks)</h4>
+    <p style="font-size:12px;color:#888;margin:0 0 8px;">
+      Generate in Protect → Settings → Control Plane → Integrations → Create API Key.
+    </p>
+    <div class="form-group">
+      <label>API key</label>
+      <input type="password" id="unifi-apikey" placeholder="paste API key">
+    </div>
+    <div class="btn-group" style="margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" id="btn-test-apikey">Test API key</button>
+      <span class="status-msg" id="test-apikey-result"></span>
+    </div>
+    <div class="btn-group" style="margin-top:18px;border-top:1px solid #333;padding-top:14px;">
+      <button class="btn" id="btn-save-unifi">Save to config.yml</button>
+      <span class="status-msg" id="save-unifi-result"></span>
+    </div>
+  </div>
+</div>
+
+<div id="onvif" class="pane">
+  <div class="card">
+    <div class="card-header"><h3>ONVIF — fleet credentials</h3></div>
+    <p style="font-size:13px;color:#bbb;margin:0 0 14px;">
+      Applied to every camera discovered in Protect unless overridden per-camera.
+    </p>
+    <div id="onvif-msg"></div>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="onvif-username" placeholder="admin" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="onvif-password" placeholder="password" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>Port</label>
+      <input type="text" id="onvif-port" placeholder="80" style="max-width:100px;">
+    </div>
+    <div class="btn-group" style="margin-top:14px;">
+      <button class="btn" id="btn-save-onvif">Save to config.yml</button>
+      <span class="status-msg" id="save-onvif-result"></span>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h3>Camera ONVIF topics (live)</h3></div>
+    <p style="font-size:12px;color:#888;margin:0 0 10px;">
+      Topics your cameras advertised via <code>GetEventProperties</code>.
+      Populates after a successful ONVIF subscription.
+    </p>
+    <div id="topics-block"><span class="empty">Loading…</span></div>
+  </div>
+</div>
+
 <div id="setup" class="pane">
   <div class="card">
     <div class="card-header"><h3>Configure Protect Alarm Manager rules</h3></div>
     <div style="font-size:13px;color:#bbb;margin-bottom:10px;">
-      Protect's integration API doesn't expose alarm-rule CRUD, so each rule has to be created in the
-      Protect UI. The bridge will fire the webhook IDs listed below; create one matching alarm rule
-      per row you care about. Active template:
-      <code id="setup-template">—</code>.
+      Protect's integration API doesn't expose alarm-rule CRUD, so each rule must be created
+      in the Protect UI. The bridge fires the webhook IDs listed below; create one matching
+      alarm rule per row you care about. Active template: <code id="setup-template">—</code>.
     </div>
-    <h4>One-time setup, per row you want</h4>
+    <h4>One-time setup per row</h4>
     <ol class="steps">
       <li>Open <strong>UniFi Protect</strong> → <strong>Alarm Manager</strong> → <strong>Create Alarm</strong>.</li>
       <li>Set the trigger to <strong>Custom Webhook</strong>.</li>
-      <li>Paste the row's webhook ID (use the Copy button →) into the <em>Trigger ID</em> field.</li>
-      <li>Configure downstream actions: push notification, recording extension, send to a webhook, etc.</li>
-      <li>Save. The status column below flips to <span class="ok">firing</span> the next time the bridge sends an event of that kind.</li>
+      <li>Paste the row's webhook ID (Copy button →) into the <em>Trigger ID</em> field.</li>
+      <li>Configure actions: push notification, recording extension, etc.</li>
+      <li>Save. The status column flips to <span class="ok">firing</span> the next time the bridge sees that kind of event.</li>
     </ol>
-    <p style="font-size:12px;color:#888;margin:10px 0 0;">
-      You only need rules for kinds your cameras actually emit — but unconfigured rows do no harm,
-      they're just no-ops. Setup template can be changed via <code>alarms.webhook_id_template</code>
-      in <code>config.yml</code>.
-    </p>
   </div>
   <div class="card">
     <div class="card-header"><h3>Webhook IDs</h3></div>
@@ -149,7 +257,7 @@ _INDEX_HTML = """<!doctype html>
           </select>
         </label>
         <label style="margin:0;"><input type="checkbox" id="log-auto"> Auto-refresh (3s)</label>
-        <button id="log-refresh">Refresh</button>
+        <button class="btn btn-ghost btn-sm" id="log-refresh">Refresh</button>
       </div>
     </div>
     <pre id="log-output">Loading…</pre>
@@ -157,167 +265,150 @@ _INDEX_HTML = """<!doctype html>
 </div>
 
 <script>
-function esc(s){return String(s ?? "").replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
 function fmtAgo(epoch){if(!epoch)return '—';var s=Math.max(0,Math.floor(Date.now()/1000-epoch));if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
+function setMsg(id,ok,msg){var el=document.getElementById(id);el.className='status-msg '+(ok?'ok':'err');el.textContent=msg;}
+function switchTab(name){var t=document.querySelector('[data-pane="'+name+'"]');if(t)t.click();}
 
-document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-  document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+document.querySelectorAll('.tab').forEach(function(t){t.addEventListener('click',function(){
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
+  document.querySelectorAll('.pane').forEach(function(x){x.classList.remove('active');});
   t.classList.add('active');
   document.getElementById(t.dataset.pane).classList.add('active');
-  if (t.dataset.pane === 'logs') refreshLogs();
-  if (t.dataset.pane === 'setup') refreshSetup();
-}));
+  if(t.dataset.pane==='logs')refreshLogs();
+  if(t.dataset.pane==='setup')refreshSetup();
+  if(t.dataset.pane==='onvif'){loadOnvif();loadTopics();}
+  if(t.dataset.pane==='unifi')loadUnifi();
+});});
 
-async function refreshStatus(){
-  try {
-    const data = await (await fetch('/api/status')).json();
-    var b = data.build || {};
-    var bridge = data.bridge || {};
-    document.getElementById('bridge-grid').innerHTML =
-      '<div class="row"><span class="label">Image variant</span><span><code>'+esc(data.variant||'onvif')+'</code></span></div>'+
-      '<div class="row"><span class="label">Build</span><span>'+esc(b.git_sha_short||'?')+' ('+esc(b.git_ref||'?')+')</span></div>'+
-      '<div class="row"><span class="label">Built</span><span>'+esc(b.build_time||'?')+'</span></div>'+
-      '<div class="row"><span class="label">Uptime</span><span>'+(data.uptime_seconds||0)+'s</span></div>'+
-      '<div class="row"><span class="label">Last discovery</span><span>'+fmtAgo(bridge.last_discovery_epoch)+'</span></div>'+
-      '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
-
-    var cams = data.cameras || [];
-    var camsEl = document.getElementById('cams-block');
-    if (!cams.length) {
-      camsEl.innerHTML = '<span class="empty">No ONVIF cameras discovered yet. Check unifi credentials, or wait '+(60)+'s for the next discovery cycle.</span>';
-    } else {
-      var html = '<div class="cam-row header"><span>Name</span><span>IP</span><span>State (Protect)</span><span>Subscription</span><span>Last event</span><span>Topic / kind</span></div>';
-      cams.forEach(function(c){
-        var sub = (data.subscriptions || {})[c.protect_id];
-        var subStat = sub ? (sub.is_connected ? 'connected' : 'connecting…') : 'no creds';
-        var subCls = sub ? (sub.is_connected ? 'ok' : 'warn') : 'err';
-        var ev = sub && sub.last_event;
-        var lastEv = ev ? fmtAgo(ev.timestamp_epoch) : '—';
-        var kind = ev ? '<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc(ev.topic||'').slice(0,60) : '';
-        html += '<div class="cam-row">'+
-          '<span>'+esc(c.name)+'</span>'+
-          '<span><code>'+esc(c.host||'?')+'</code></span>'+
-          '<span>'+esc(c.state||'')+'</span>'+
-          '<span class="'+subCls+'">'+esc(subStat)+(sub && sub.last_error ? ' <span class="err" title="'+esc(sub.last_error)+'">!</span>' : '')+'</span>'+
-          '<span>'+lastEv+'</span>'+
-          '<span>'+kind+'</span>'+
-        '</div>';
-      });
-      camsEl.innerHTML = html;
-    }
-
-    var ps = data.pusher_stats || {};
-    var lastEvent = ps.last_event;
-    var lastOutcome = ps.last_outcome;
-    document.getElementById('push-grid').innerHTML =
-      '<div class="row"><span class="label">Alarm triggers OK / failed</span><span><span class="ok">'+(ps.pushes_ok||0)+'</span> / <span class="err">'+(ps.pushes_failed||0)+'</span></span></div>'+
-      '<div class="row"><span class="label">Last event</span><span>'+(lastEvent ? fmtAgo(ps.last_event_epoch)+' — '+esc(lastEvent.camera_name)+' / <span class="pill kind-'+esc(lastEvent.kind)+'">'+esc(lastEvent.kind)+'</span>' : '—')+'</span></div>'+
-      '<div class="row"><span class="label">Last webhook id</span><span><code>'+esc(lastOutcome && lastOutcome.webhook_id || '—')+'</code></span></div>'+
-      '<div class="row"><span class="label">Last outcome</span><span class="'+(lastOutcome && lastOutcome.ok ? 'ok' : 'err')+'">'+(lastOutcome ? esc(lastOutcome.method)+' — '+esc(lastOutcome.message||(lastOutcome.ok?'OK':'failed')) : '—')+'</span></div>';
-  } catch (e) { /* ignore */ }
-}
-
-async function refreshSetup(){
-  try {
-    const data = await (await fetch('/api/setup')).json();
-    document.getElementById('setup-template').textContent = data.webhook_id_template || '—';
-    var rows = data.rows || [];
-    var el = document.getElementById('setup-table');
-    if (!rows.length) {
-      el.innerHTML = '<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';
-      return;
-    }
-    var html = '<div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
-    rows.forEach(function(r){
-      var status, statusCls;
-      if (r.fires_ok > 0) {
-        status = 'firing — last ' + fmtAgo(r.last_fire_epoch) + ' (' + r.fires_ok + ' total)';
-        statusCls = 'ok';
-      } else if (r.fires_failed > 0) {
-        status = 'failing — HTTP ' + (r.last_status || '?') + ' (' + r.fires_failed + ' failures)';
-        statusCls = 'err';
-      } else {
-        status = 'not yet fired';
-        statusCls = 'label';
-      }
-      html += '<div class="setup-row">'+
-        '<span>'+esc(r.camera_name)+'</span>'+
-        '<span><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span>'+
-        '<span class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span>'+
-        '<span class="'+statusCls+'">'+esc(status)+'</span>'+
-      '</div>';
-    });
-    el.innerHTML = html;
-    el.querySelectorAll('.copy-btn').forEach(function(b){
-      b.addEventListener('click', async function(){
-        try {
-          await navigator.clipboard.writeText(b.dataset.copy);
-          b.classList.add('copied');
-          var prev = b.textContent;
-          b.textContent = 'Copied!';
-          setTimeout(function(){ b.classList.remove('copied'); b.textContent = prev; }, 1200);
-        } catch (e) {
-          // Fallback: select the code text so user can ctrl-c
-          var range = document.createRange();
-          range.selectNode(b.previousElementSibling);
-          window.getSelection().removeAllRanges();
-          window.getSelection().addRange(range);
-        }
-      });
-    });
-  } catch (e) { /* ignore */ }
-}
-
-async function refreshLogs(){
-  var lines = document.getElementById('log-lines').value;
-  try {
-    var resp = await fetch('/api/logs?lines='+encodeURIComponent(lines));
-    var text = await resp.text();
-    document.getElementById('log-output').textContent = text || '(empty)';
-  } catch (e) {
-    document.getElementById('log-output').textContent = 'Failed to load logs: '+e;
+async function refreshStatus(){try{
+  var data=await(await fetch('/api/status')).json();
+  var b=data.build||{};var bridge=data.bridge||{};
+  var banner=document.getElementById('status-error-banner');
+  if(bridge.last_discovery_error){
+    banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
+  }else{banner.innerHTML='';}
+  document.getElementById('bridge-grid').innerHTML=
+    '<div class="row"><span class="label">Image variant</span><span><code>'+esc(data.variant||'onvif')+'</code></span></div>'+
+    '<div class="row"><span class="label">Build</span><span>'+esc(b.git_sha_short||'?')+' ('+esc(b.git_ref||'?')+')</span></div>'+
+    '<div class="row"><span class="label">Built</span><span>'+esc(b.build_time||'?')+'</span></div>'+
+    '<div class="row"><span class="label">Uptime</span><span>'+(data.uptime_seconds||0)+'s</span></div>'+
+    '<div class="row"><span class="label">Last discovery</span><span>'+fmtAgo(bridge.last_discovery_epoch)+'</span></div>'+
+    '<div class="row"><span class="label">Discovery error</span><span class="'+(bridge.last_discovery_error?'err':'ok')+'">'+esc(bridge.last_discovery_error||'none')+'</span></div>';
+  var cams=data.cameras||[];var camsEl=document.getElementById('cams-block');
+  if(!cams.length){
+    camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
+  }else{
+    var html='<div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
+    cams.forEach(function(c){
+      var sub=(data.subscriptions||{})[c.protect_id];
+      var subStat=sub?(sub.is_connected?'connected':'connecting…'):'no creds';
+      var subCls=sub?(sub.is_connected?'ok':'warn'):'err';
+      var ev=sub&&sub.last_event;
+      var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
+      var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
+      html+='<div class="cam-row"><span>'+esc(c.name)+'</span><span><code>'+esc(c.host||'?')+'</code></span><span>'+esc(c.state||'')+'</span><span class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'">!</span>':'')+'</span><span>'+lastEv+'</span><span>'+kind+'</span></div>';
+    });camsEl.innerHTML=html;
   }
-}
+  var ps=data.pusher_stats||{};var le=ps.last_event;var lo=ps.last_outcome;
+  document.getElementById('push-grid').innerHTML=
+    '<div class="row"><span class="label">Alarm triggers OK / failed</span><span><span class="ok">'+(ps.pushes_ok||0)+'</span> / <span class="err">'+(ps.pushes_failed||0)+'</span></span></div>'+
+    '<div class="row"><span class="label">Last event</span><span>'+(le?fmtAgo(ps.last_event_epoch)+' — '+esc(le.camera_name)+' / <span class="pill kind-'+esc(le.kind)+'">'+esc(le.kind)+'</span>':'—')+'</span></div>'+
+    '<div class="row"><span class="label">Last webhook id</span><span><code>'+esc(lo&&lo.webhook_id||'—')+'</code></span></div>'+
+    '<div class="row"><span class="label">Last outcome</span><span class="'+(lo&&lo.ok?'ok':'err')+'">'+(lo?esc(lo.method)+' — '+esc(lo.message||(lo.ok?'OK':'failed')):'—')+'</span></div>';
+}catch(e){}}
 
-document.getElementById('log-refresh').addEventListener('click', refreshLogs);
-var logTimer;
-document.getElementById('log-auto').addEventListener('change', function(e){
-  clearInterval(logTimer);
-  if (e.target.checked) logTimer = setInterval(refreshLogs, 3000);
+async function loadUnifi(){try{
+  var d=await(await fetch('/api/config/unifi')).json();
+  document.getElementById('unifi-host').value=d.host||'';
+  document.getElementById('unifi-username').value=d.username||'';
+  document.getElementById('unifi-password').value=d.password||'';
+  document.getElementById('unifi-apikey').value=d.api_key||'';
+}catch(e){}}
+
+document.getElementById('btn-test-userpass').addEventListener('click',async function(){
+  var host=document.getElementById('unifi-host').value.trim();
+  var user=document.getElementById('unifi-username').value.trim();
+  var pass=document.getElementById('unifi-password').value;
+  setMsg('test-userpass-result',true,'Testing…');
+  try{var r=await(await fetch('/api/test/userpass',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({host,username:user,password:pass})})).json();setMsg('test-userpass-result',r.ok,r.message);}catch(e){setMsg('test-userpass-result',false,'Request failed: '+e);}
 });
 
+document.getElementById('btn-test-apikey').addEventListener('click',async function(){
+  var host=document.getElementById('unifi-host').value.trim();
+  var apikey=document.getElementById('unifi-apikey').value.trim();
+  setMsg('test-apikey-result',true,'Testing…');
+  try{var r=await(await fetch('/api/test/apikey',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({host,api_key:apikey})})).json();setMsg('test-apikey-result',r.ok,r.message);}catch(e){setMsg('test-apikey-result',false,'Request failed: '+e);}
+});
+
+document.getElementById('btn-save-unifi').addEventListener('click',async function(){
+  var host=document.getElementById('unifi-host').value.trim();
+  var user=document.getElementById('unifi-username').value.trim();
+  var pass=document.getElementById('unifi-password').value;
+  var apikey=document.getElementById('unifi-apikey').value.trim();
+  setMsg('save-unifi-result',true,'Saving…');
+  try{var r=await(await fetch('/api/config/unifi',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({host,username:user,password:pass,api_key:apikey})})).json();setMsg('save-unifi-result',r.ok,r.message);}catch(e){setMsg('save-unifi-result',false,'Save failed: '+e);}
+});
+
+async function loadOnvif(){try{
+  var d=await(await fetch('/api/config/onvif')).json();
+  document.getElementById('onvif-username').value=d.username||'';
+  document.getElementById('onvif-password').value=d.password||'';
+  document.getElementById('onvif-port').value=d.port||'80';
+}catch(e){}}
+
+document.getElementById('btn-save-onvif').addEventListener('click',async function(){
+  var user=document.getElementById('onvif-username').value.trim();
+  var pass=document.getElementById('onvif-password').value;
+  var port=parseInt(document.getElementById('onvif-port').value)||80;
+  setMsg('save-onvif-result',true,'Saving…');
+  try{var r=await(await fetch('/api/config/onvif',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:user,password:pass,port})})).json();setMsg('save-onvif-result',r.ok,r.message);}catch(e){setMsg('save-onvif-result',false,'Save failed: '+e);}
+});
+
+async function loadTopics(){try{
+  var cams=await(await fetch('/api/cameras/topics')).json();
+  var el=document.getElementById('topics-block');
+  if(!cams.length){el.innerHTML='<span class="empty">No active subscriptions yet — connect a camera first.</span>';return;}
+  var html='<div class="onvif-row header"><span>Camera</span><span>IP</span><span>Status</span><span>Advertised ONVIF topics</span></div>';
+  cams.forEach(function(c){
+    var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':'connecting…';
+    var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">none advertised</span>';
+    html+='<div class="onvif-row"><span>'+esc(c.name)+'</span><span><code>'+esc(c.host)+'</code></span><span class="'+statCls+'">'+statTxt+'</span><span><div class="topic-list">'+topics+'</div></span></div>';
+  });el.innerHTML=html;
+}catch(e){}}
+
+async function refreshSetup(){try{
+  var data=await(await fetch('/api/setup')).json();
+  document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
+  var rows=data.rows||[];var el=document.getElementById('setup-table');
+  if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
+  var html='<div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
+  rows.forEach(function(r){
+    var status,statusCls;
+    if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
+    else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
+    else{status='not yet fired';statusCls='label';}
+    html+='<div class="setup-row"><span>'+esc(r.camera_name)+'</span><span><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span class="'+statusCls+'">'+esc(status)+'</span></div>';
+  });el.innerHTML=html;
+  el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
+}catch(e){}}
+
+async function refreshLogs(){var lines=document.getElementById('log-lines').value;try{var resp=await fetch('/api/logs?lines='+encodeURIComponent(lines));var text=await resp.text();document.getElementById('log-output').textContent=text||'(empty)';}catch(e){document.getElementById('log-output').textContent='Failed to load logs: '+e;}}
+
+document.getElementById('log-refresh').addEventListener('click',refreshLogs);
+var logTimer;
+document.getElementById('log-auto').addEventListener('change',function(e){clearInterval(logTimer);if(e.target.checked)logTimer=setInterval(refreshLogs,3000);});
+
 refreshStatus();
-setInterval(refreshStatus, 3000);
-// Setup tab refreshes on demand and every 5s while it's the visible pane
-setInterval(function(){
-  if (document.querySelector('[data-pane="setup"].active')) refreshSetup();
-}, 5000);
-</script></body></html>
-"""
-
-# RTSP password redaction in log lines (mirrors the full image's behaviour).
-_RTSP_PWD_RE = re.compile(r"(rtsp://[^:]+:)([^@]+)(@)")
-
-DEFAULT_WEBHOOK_TEMPLATE = "onvif-bridge:{protect_id}:{kind}"
-
-
-def _format_webhook_id(template: str, protect_id: str, kind: str,
-                       name: str) -> str:
-    """Apply the user's template; fall back to the default on KeyError."""
-    try:
-        return template.format(protect_id=protect_id, kind=kind, name=name)
-    except (KeyError, IndexError, ValueError):
-        return DEFAULT_WEBHOOK_TEMPLATE.format(
-            protect_id=protect_id, kind=kind, name=name,
-        )
+setInterval(refreshStatus,3000);
+setInterval(function(){if(document.querySelector('[data-pane="setup"].active'))refreshSetup();},5000);
+</script></body></html>"""
 
 
 class BridgeWebTool:
-    """Lightweight web app — Status, Setup, Logs."""
+    """Five-tab web app: Status, UniFi Creds, ONVIF Creds, Setup, Logs."""
 
-    def __init__(self, config: dict,
-                 state_provider: Callable[[], dict]):
+    def __init__(self, config: dict, state_provider: Callable[[], dict]):
         self.config = config
         self._state_provider = state_provider
         self._start_time = time.monotonic()
@@ -326,14 +417,187 @@ class BridgeWebTool:
         self.app.router.add_get("/api/status", self._status)
         self.app.router.add_get("/api/setup", self._setup)
         self.app.router.add_get("/api/logs", self._logs)
+        self.app.router.add_get("/api/cameras/topics", self._camera_topics)
+        self.app.router.add_get("/api/config/unifi", self._get_unifi)
+        self.app.router.add_post("/api/config/unifi", self._post_unifi)
+        self.app.router.add_get("/api/config/onvif", self._get_onvif)
+        self.app.router.add_post("/api/config/onvif", self._post_onvif)
+        self.app.router.add_post("/api/test/userpass", self._test_userpass)
+        self.app.router.add_post("/api/test/apikey", self._test_apikey)
 
     async def _index(self, _: web.Request) -> web.Response:
         return web.Response(text=_INDEX_HTML, content_type="text/html")
 
+    def _save_config(self) -> None:
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                yaml.dump(dict(self.config), f, default_flow_style=False,
+                         allow_unicode=True)
+        except OSError as exc:
+            raise RuntimeError(f"Could not write config: {exc}") from exc
+
+    async def _get_unifi(self, _: web.Request) -> web.Response:
+        cfg = self.config.get("unifi") or {}
+        return web.json_response({
+            "host": cfg.get("host", ""),
+            "username": cfg.get("username", ""),
+            "password": cfg.get("password", ""),
+            "api_key": cfg.get("api_key", ""),
+        })
+
+    async def _post_unifi(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        cfg = self.config.setdefault("unifi", {})
+        if not isinstance(cfg, dict):
+            self.config["unifi"] = cfg = {}
+        cfg["host"] = str(body.get("host", "")).strip()
+        cfg["username"] = str(body.get("username", "")).strip()
+        cfg["password"] = str(body.get("password", ""))
+        cfg["api_key"] = str(body.get("api_key", "")).strip()
+        try:
+            self._save_config()
+        except RuntimeError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        return web.json_response({
+            "ok": True,
+            "message": "Saved. Discovery will pick up new credentials on the next 60s cycle.",
+        })
+
+    async def _get_onvif(self, _: web.Request) -> web.Response:
+        cfg = self.config.get("onvif") or {}
+        return web.json_response({
+            "username": cfg.get("username", ""),
+            "password": cfg.get("password", ""),
+            "port": cfg.get("port", 80),
+        })
+
+    async def _post_onvif(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        cfg = self.config.setdefault("onvif", {})
+        if not isinstance(cfg, dict):
+            self.config["onvif"] = cfg = {}
+        cfg["username"] = str(body.get("username", "")).strip()
+        cfg["password"] = str(body.get("password", ""))
+        cfg["port"] = int(body.get("port", 80))
+        try:
+            self._save_config()
+        except RuntimeError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        return web.json_response({
+            "ok": True,
+            "message": "Saved. New ONVIF creds will apply to newly discovered cameras.",
+        })
+
+    async def _test_userpass(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        host = str(body.get("host", "")).strip()
+        username = str(body.get("username", "")).strip()
+        password = str(body.get("password", ""))
+        if not host or not username or not password:
+            return web.json_response({
+                "ok": False,
+                "message": "host, username, and password are required",
+            })
+        base = host if host.startswith("http") else f"https://{host}"
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(connector=connector,
+                                           timeout=timeout) as session:
+                async with session.post(
+                    f"{base}/api/auth/login",
+                    json={"username": username, "password": password},
+                ) as r:
+                    if r.status in (200, 201):
+                        return web.json_response({
+                            "ok": True,
+                            "message": f"Login successful (HTTP {r.status})",
+                        })
+                    text = (await r.text())[:200]
+                    return web.json_response({
+                        "ok": False,
+                        "message": f"Login failed: HTTP {r.status}",
+                    })
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "message": f"Connection error: {exc}",
+            })
+
+    async def _test_apikey(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        host = str(body.get("host", "")).strip()
+        api_key = str(body.get("api_key", "")).strip()
+        if not host or not api_key:
+            return web.json_response({
+                "ok": False,
+                "message": "host and api_key are required",
+            })
+        base = host if host.startswith("http") else f"https://{host}"
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(connector=connector,
+                                           timeout=timeout) as session:
+                async with session.get(
+                    f"{base}/proxy/protect/integration/v1/cameras",
+                    headers={"X-API-Key": api_key},
+                ) as r:
+                    if r.status in (200, 201):
+                        return web.json_response({
+                            "ok": True,
+                            "message": f"API key valid (HTTP {r.status})",
+                        })
+                    if r.status in (401, 403):
+                        return web.json_response({
+                            "ok": False,
+                            "message": f"API key rejected (HTTP {r.status})",
+                        })
+                    text = (await r.text())[:200]
+                    return web.json_response({
+                        "ok": False,
+                        "message": f"Unexpected: HTTP {r.status}",
+                    })
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "message": f"Connection error: {exc}",
+            })
+
+    async def _camera_topics(self, _: web.Request) -> web.Response:
+        state = self._state_provider()
+        subs = state.get("subscriptions") or {}
+        result = []
+        for pid, sub in subs.items():
+            result.append({
+                "protect_id": pid,
+                "name": sub.name,
+                "host": sub.onvif_host,
+                "is_connected": sub.is_connected,
+                "supported_topics": sub.supported_topics or [],
+            })
+        return web.json_response(result)
+
     async def _status(self, _: web.Request) -> web.Response:
         state = self._state_provider()
         subs = state.get("subscriptions") or {}
-        # Project subscription state into JSON-safe shapes.
         sub_payload: Dict[str, dict] = {}
         for pid, sub in subs.items():
             ev = sub.last_event
@@ -384,18 +648,11 @@ class BridgeWebTool:
         })
 
     async def _setup(self, _: web.Request) -> web.Response:
-        """Return the (camera × kind) → webhook-id table for the Setup tab.
-
-        Each row carries firing stats from the pusher so the user can
-        immediately see whether a configured Protect Alarm Manager rule
-        is actually being hit.
-        """
         state = self._state_provider()
         template = state.get("webhook_id_template") or DEFAULT_WEBHOOK_TEMPLATE
         cams = state.get("discovered_cameras", []) or []
         ps = state.get("pusher_stats")
         wstats: dict = getattr(ps, "webhook_stats", {}) if ps is not None else {}
-
         rows = []
         for cam in cams:
             protect_id = cam.get("protect_id", "")
@@ -413,7 +670,6 @@ class BridgeWebTool:
                     "last_fire_epoch": ws.last_fire_epoch if ws else 0,
                     "last_status": ws.last_status if ws else 0,
                 })
-
         return web.json_response({
             "webhook_id_template": template,
             "supported_kinds": SUPPORTED_KINDS,
@@ -428,13 +684,14 @@ class BridgeWebTool:
         lines = max(50, min(lines, 5000))
         log_path = Path("/config/camproxy.log")
         if not log_path.exists():
-            return web.Response(text="(no log file yet)", content_type="text/plain")
+            return web.Response(text="(no log file yet)",
+                              content_type="text/plain")
         try:
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 tail = f.readlines()[-lines:]
         except OSError as exc:
             return web.Response(text=f"(could not read log: {exc})",
-                                content_type="text/plain")
+                              content_type="text/plain")
         redacted = "".join(_RTSP_PWD_RE.sub(r"\1***\3", line) for line in tail)
         return web.Response(text=redacted, content_type="text/plain")
 
@@ -444,6 +701,5 @@ class BridgeWebTool:
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
         logger.info("Web UI: http://0.0.0.0:%d/", port)
-        # Hold the coroutine so the runner isn't garbage-collected.
         while True:
             await asyncio.sleep(3600)
