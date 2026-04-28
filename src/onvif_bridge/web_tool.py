@@ -55,22 +55,25 @@ def _format_webhook_id(template: str, protect_id: str, kind: str,
 
 
 _INDEX_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><title>unifi-ai-camproxy / ONVIF bridge</title>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unifi-ai-camproxy / ONVIF bridge</title>
 <style>
  * { box-sizing: border-box; }
- body { font-family: -apple-system, system-ui, sans-serif; background:#1a1a1a; color:#ddd; margin:0; padding:18px; max-width:1100px; }
+ html, body { max-width:100%; overflow-x:hidden; }
+ body { font-family: -apple-system, system-ui, sans-serif; background:#1a1a1a; color:#ddd; margin:0 auto; padding:18px; max-width:1100px; }
  h1 { font-size:18px; margin:0 0 12px; }
  h4 { margin:14px 0 6px; font-size:13px; color:#bbb; }
- .tabs { display:flex; gap:6px; margin-bottom:14px; border-bottom:1px solid #333; }
+ .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px; border-bottom:1px solid #333; }
  .tab { background:none; border:0; color:#888; padding:8px 14px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; }
  .tab.active { color:#ddd; border-bottom-color:#3b82f6; }
  .pane { display:none; }
  .pane.active { display:block; }
  .card { background:#222; border:1px solid #333; border-radius:5px; padding:14px 18px; margin-bottom:14px; }
- .card-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+ .card-header { display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin-bottom:10px; }
  .card h3 { margin:0; font-size:15px; }
  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:6px 18px; }
- .row { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #2a2a2a; font-size:13px; }
+ .row { display:flex; flex-wrap:wrap; gap:6px; justify-content:space-between; padding:5px 0; border-bottom:1px solid #2a2a2a; font-size:13px; }
  .row:last-child { border-bottom:0; }
  .label { color:#888; }
  .empty { color:#666; font-style:italic; }
@@ -83,38 +86,65 @@ _INDEX_HTML = """<!doctype html>
  .pill.kind-line_crossing { background:#5f3a1e; color:#fa4; }
  .pill.kind-motion { background:#333; color:#bbb; }
  .pill.kind-audio { background:#3b1e5f; color:#c8a; }
- code { background:#111; padding:1px 5px; border-radius:3px; font-size:12px; }
- .copy-row { display:flex; gap:6px; align-items:center; }
- .copy-row code { flex:1; padding:4px 8px; font-size:12px; overflow-x:auto; white-space:nowrap; }
+ code { background:#111; padding:1px 5px; border-radius:3px; font-size:12px; word-break:break-all; }
+ .copy-row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; min-width:0; }
+ .copy-row code { flex:1 1 200px; min-width:0; padding:4px 8px; font-size:12px; overflow-x:auto; white-space:nowrap; }
  .copy-btn { background:#333; border:0; color:#ddd; padding:4px 10px; border-radius:3px; cursor:pointer; font-size:12px; }
  .copy-btn:hover { background:#444; }
  .copy-btn.copied { background:#0d3b2c; color:#6f6; }
  ol.steps { margin:0; padding-left:22px; line-height:1.55; font-size:13px; }
  ol.steps li { margin-bottom:6px; }
- .cam-row { display:grid; grid-template-columns:2fr 1.4fr 1fr 1fr 1fr 1.2fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; }
+ .cam-row { display:grid; grid-template-columns:2fr 1.4fr 1fr 1fr 1fr 1.2fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
  .cam-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
- .setup-row { display:grid; grid-template-columns:1.4fr 1fr 2.6fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; }
+ .setup-row { display:grid; grid-template-columns:1.4fr 1fr 2.6fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
  .setup-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
  pre#log-output { background:#111; border:1px solid #333; border-radius:4px; padding:10px; max-height:65vh; overflow:auto; font-size:12px; line-height:1.4; white-space:pre-wrap; word-break:break-all; margin:0; }
  .form-group { display:grid; grid-template-columns:140px 1fr; gap:8px; align-items:center; margin-bottom:10px; font-size:13px; }
  .form-group label { color:#bbb; text-align:right; }
- .form-group input { background:#111; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:4px; font-size:13px; }
+ .form-group input { background:#111; border:1px solid #444; color:#ddd; padding:6px 10px; border-radius:4px; font-size:13px; min-width:0; width:100%; }
  .form-group input:focus { outline:none; border-color:#3b82f6; }
  .btn { background:#3b82f6; border:0; color:#fff; padding:7px 14px; border-radius:4px; cursor:pointer; font-size:13px; }
  .btn:hover { background:#2563eb; }
  .btn-ghost { background:#333; color:#ddd; }
  .btn-ghost:hover { background:#444; }
  .btn-sm { padding:4px 10px; font-size:12px; }
- .btn-group { display:flex; gap:8px; align-items:center; }
+ .btn-group { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
  .alert { padding:10px 14px; border-radius:4px; font-size:13px; margin-bottom:12px; }
  .alert-err { background:#3b0000; border:1px solid #7f1d1d; color:#fca5a5; }
  .topic-list { display:flex; flex-wrap:wrap; gap:4px; }
- .topic-pill { background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:9px; font-size:11px; font-family:monospace; }
- .onvif-row { display:grid; grid-template-columns:1.5fr 1fr 1fr 3fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:start; }
+ .topic-pill { background:#1e293b; color:#94a3b8; padding:2px 8px; border-radius:9px; font-size:11px; font-family:monospace; word-break:break-all; }
+ .onvif-row { display:grid; grid-template-columns:1.5fr 1fr 1fr 3fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:start; word-break:break-word; }
  .onvif-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; align-items:center; }
  .status-msg { font-size:12px; }
  .status-msg.ok { color:#4c4; }
  .status-msg.err { color:#f87; }
+ .table-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+ .table-scroll > .cam-row, .table-scroll > .setup-row, .table-scroll > .onvif-row { min-width:640px; }
+
+ /* Tablet: tighter padding, allow form labels to stack */
+ @media (max-width: 768px) {
+   body { padding:12px; }
+   .card { padding:12px; }
+   .form-group { grid-template-columns:1fr; gap:4px; }
+   .form-group label { text-align:left; }
+   .form-group input { max-width:none !important; }
+ }
+
+ /* Phones: stack table rows into label/value pairs */
+ @media (max-width: 560px) {
+   body { padding:10px; }
+   h1 { font-size:16px; }
+   .tab { padding:6px 10px; font-size:13px; }
+   .card { padding:10px; }
+   .card-header { flex-direction:column; align-items:flex-start; }
+   .table-scroll > .cam-row, .table-scroll > .setup-row, .table-scroll > .onvif-row { min-width:0; }
+   .cam-row, .setup-row, .onvif-row { grid-template-columns:1fr; gap:2px; padding:8px 0; }
+   .cam-row.header, .setup-row.header, .onvif-row.header { display:none; }
+   .cam-row > span, .setup-row > span, .onvif-row > span { padding:1px 0; }
+   .cam-row > span::before, .setup-row > span::before, .onvif-row > span::before { content: attr(data-label); color:#888; font-size:11px; display:block; text-transform:uppercase; letter-spacing:.5px; }
+   .copy-row { flex-wrap:wrap; }
+   .copy-row code { flex-basis:100%; }
+ }
 </style></head><body>
 <h1>unifi-ai-camproxy / ONVIF bridge</h1>
 <div class="tabs">
@@ -299,7 +329,7 @@ async function refreshStatus(){try{
   if(!cams.length){
     camsEl.innerHTML='<span class="empty">No ONVIF cameras discovered yet. Check <a href="#" onclick="switchTab(\'unifi\');return false;" style="color:#888;">UniFi credentials</a>, or wait 60s for next discovery cycle.</span>';
   }else{
-    var html='<div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
+    var html='<div class="table-scroll"><div class="cam-row header"><span>Name</span><span>IP</span><span>Protect state</span><span>ONVIF sub</span><span>Last event</span><span>Kind / topic</span></div>';
     cams.forEach(function(c){
       var sub=(data.subscriptions||{})[c.protect_id];
       var subStat=sub?(sub.is_connected?'connected':'connecting…'):'no creds';
@@ -307,8 +337,8 @@ async function refreshStatus(){try{
       var ev=sub&&sub.last_event;
       var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
       var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
-      html+='<div class="cam-row"><span>'+esc(c.name)+'</span><span><code>'+esc(c.host||'?')+'</code></span><span>'+esc(c.state||'')+'</span><span class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'">!</span>':'')+'</span><span>'+lastEv+'</span><span>'+kind+'</span></div>';
-    });camsEl.innerHTML=html;
+      html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+(sub&&sub.last_error?'<span class="err" title="'+esc(sub.last_error)+'">!</span>':'')+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
+    });html+='</div>';camsEl.innerHTML=html;
   }
   var ps=data.pusher_stats||{};var le=ps.last_event;var lo=ps.last_outcome;
   document.getElementById('push-grid').innerHTML=
@@ -369,12 +399,12 @@ async function loadTopics(){try{
   var cams=await(await fetch('/api/cameras/topics')).json();
   var el=document.getElementById('topics-block');
   if(!cams.length){el.innerHTML='<span class="empty">No active subscriptions yet — connect a camera first.</span>';return;}
-  var html='<div class="onvif-row header"><span>Camera</span><span>IP</span><span>Status</span><span>Advertised ONVIF topics</span></div>';
+  var html='<div class="table-scroll"><div class="onvif-row header"><span>Camera</span><span>IP</span><span>Status</span><span>Advertised ONVIF topics</span></div>';
   cams.forEach(function(c){
     var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':'connecting…';
     var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">none advertised</span>';
-    html+='<div class="onvif-row"><span>'+esc(c.name)+'</span><span><code>'+esc(c.host)+'</code></span><span class="'+statCls+'">'+statTxt+'</span><span><div class="topic-list">'+topics+'</div></span></div>';
-  });el.innerHTML=html;
+    html+='<div class="onvif-row"><span data-label="Camera">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host)+'</code></span><span data-label="Status" class="'+statCls+'">'+statTxt+'</span><span data-label="Topics"><div class="topic-list">'+topics+'</div></span></div>';
+  });html+='</div>';el.innerHTML=html;
 }catch(e){}}
 
 async function refreshSetup(){try{
@@ -382,14 +412,14 @@ async function refreshSetup(){try{
   document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
   var rows=data.rows||[];var el=document.getElementById('setup-table');
   if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
-  var html='<div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
+  var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Webhook ID</span><span>Status</span></div>';
   rows.forEach(function(r){
     var status,statusCls;
     if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
     else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
     else{status='not yet fired';statusCls='label';}
-    html+='<div class="setup-row"><span>'+esc(r.camera_name)+'</span><span><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span class="'+statusCls+'">'+esc(status)+'</span></div>';
-  });el.innerHTML=html;
+    html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
+  });html+='</div>';el.innerHTML=html;
   el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
 }catch(e){}}
 
