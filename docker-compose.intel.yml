@@ -1,18 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Intel iGPU / dGPU / NPU override — only useful with the full
-# spoof+inference image. The default :latest base is now the lightweight
-# ONVIF bridge which doesn't run any local AI, so iGPU passthrough has
-# no effect there. Layer this on top of the full compose:
+# Intel iGPU / dGPU / NPU override — useful with any non-CUDA inference image
+# (detect, lines, full). The default :latest base is now the lightweight ONVIF
+# bridge which doesn't run any local AI, so iGPU passthrough has no effect
+# there. Layer this on top of a detect / lines / full compose:
 #
 #   docker compose \
 #     -f docker-compose.yml \
-#     -f docker-compose.full.yml \
+#     -f docker-compose.detect.yml \
 #     -f docker-compose.intel.yml \
 #     up -d
 #
-# Note: no --build needed — the full image already ships OpenVINO +
-# the Intel compute runtime. This override just passes through /dev/dri
-# so OpenVINO can actually reach the GPU / NPU.
+# (substitute -f docker-compose.lines.yml or -f docker-compose.full.yml as
+# needed for the other CPU + Intel images.)
+#
+# No --build needed for the intel layer — the detect / lines / full images
+# already ship OpenVINO + the Intel compute runtime. This override just
+# passes through /dev/dri so OpenVINO can actually reach the GPU / NPU.
 #
 # What this targets:
 #   - Intel N100 / N305 mini PCs (the recommended hardware in SECONDBRAIN)
@@ -28,7 +31,7 @@
 #      the container can open /dev/dri/renderD128. `sudo usermod -aG render $USER`
 #      followed by a re-login usually sorts this.
 #
-# What this changes vs the bare full image:
+# What this changes vs the bare detect / lines / full image:
 #   - /dev/dri is bind-mounted into the container so OpenVINO can reach
 #     the iGPU / dGPU via Level Zero.
 #   - group_add: video + render so the container process has permission

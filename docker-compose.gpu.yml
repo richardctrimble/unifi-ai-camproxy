@@ -1,8 +1,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# NVIDIA CUDA override — apply on top of docker-compose.yml AND
-# docker-compose.full.yml. The default base now builds the lightweight
-# ONVIF bridge image, so CUDA only makes sense alongside the full
-# spoof+inference image.
+# Legacy NVIDIA CUDA override — apply on top of docker-compose.yml AND
+# docker-compose.full.yml. Kept for backward compatibility with users on
+# the legacy all-in-one full image.
+#
+# For new deployments prefer docker-compose.detect-cuda.yml — the detect
+# image is the focused replacement for full + CUDA:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.detect-cuda.yml \
+#     up -d --build
+#
+# Legacy usage (full + CUDA):
 #
 #   docker compose \
 #     -f docker-compose.yml \
@@ -13,17 +22,6 @@
 # Requirements on the host:
 #   1. NVIDIA GPU with a recent driver (for CUDA 12.1 runtime compat)
 #   2. nvidia-container-toolkit installed (so Docker can see the GPU)
-#
-# What this changes vs the full image:
-#   - Swaps the build to Dockerfile.full-cuda, which installs the CUDA
-#     12.1 PyTorch wheel instead of the CPU+Intel stack. Final image
-#     ~3 GB vs the full ~2.5 GB (and Intel OpenVINO is NOT shipped in
-#     the CUDA image — if you need both, build a custom variant).
-#   - `deploy.resources.reservations.devices` reserves the GPU for the
-#     container. Without this, torch still imports but `cuda.is_available()`
-#     returns False and AIEngine falls back to cpu.
-#   - Tags the image as unifi-ai-camproxy:full-cuda so it doesn't
-#     clobber the :latest or :full tags.
 #
 # Once running, check `docker compose logs -f` — AIEngine logs its
 # chosen device on startup ("Running inference on: cuda"). If you see
