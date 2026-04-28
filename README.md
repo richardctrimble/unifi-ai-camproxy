@@ -13,11 +13,10 @@ A DIY UniFi camera AI tooling. Two modes ship side by side:
   a UniFi camera in Protect and runs YOLOv8 inference locally
   (CPU/Intel/CUDA). Useful when your cameras don't have onboard AI.
 
-> **Status**: ONVIF bridge is in **preparation phase** — the skeleton
-> runs and the discovery helper is wired, but ONVIF subscription and
-> the Protect-side bookmark/alarm POSTs are still being verified.
-> The full mode is the working flow today; pull `:full` (or pin a
-> calver tag) until the bridge is production-ready.
+> **Status**: ONVIF bridge is **in development** — discovery is live,
+> ONVIF subscriptions work, and alarm webhooks fire. The web UI now has
+> credential management tabs (UniFi + ONVIF). Full mode (`:full` tag) is
+> stable and production-ready; bridge mode is actively being tested.
 
 ## How it works (full mode, today)
 
@@ -70,15 +69,25 @@ Open `http://<docker-host>:8091/` and:
 The camera auto-adopts. If a pending record gets stuck with a bad IP,
 the UniFi tab's *Cameras in Protect* panel can remove it.
 
-## Quick start (ONVIF bridge — preparation phase)
+## Quick start (ONVIF bridge — in development)
 
 ```bash
 docker compose up -d --build
 ```
 
-This builds the `:latest` image. Today it boots, exposes a stub
-dashboard, and idles — useful only for previewing the architecture.
-For actual functionality, use full mode above.
+This builds the `:latest` image. It discovers ONVIF cameras adopted in Protect,
+subscribes to their event streams, and bridges events into Protect's Alarm
+Manager. Open `http://<docker-host>:8091/` and configure:
+
+1. **UniFi Creds** tab — enter Protect host, username + password (click Test),
+   API key (click Test), Save.
+2. **ONVIF Creds** tab — enter fleet ONVIF creds (username + password + port).
+   Per-camera topics appear once subscriptions connect.
+3. **Alarm Setup** tab — for each (camera, kind) row you want to react to,
+   create a matching Custom Webhook alarm rule in Protect with the Trigger ID
+   shown here.
+
+Discovery runs every 60s. Cameras show on the **Status** tab.
 
 ## Images
 
@@ -117,7 +126,24 @@ docker compose -f docker-compose.yml \
 
 The bridge mode has no GPU dependency — that's the point.
 
-## Web UI (full mode)
+## Web UI
+
+### Bridge mode (`:latest`, primary)
+
+Five tabs at `http://<docker-host>:8091/`:
+
+- **Status** — live health: discovered cameras, per-camera ONVIF subscription
+  state, last event, alarm trigger counters, discovery error (with link to fix).
+- **UniFi Creds** — Protect host, username + password (Test button), API key
+  (Test button), save to config.yml.
+- **ONVIF Creds** — fleet ONVIF username + password + port, per-camera topics
+  that each camera advertised via GetEventProperties.
+- **Alarm Setup** — per-(camera, kind) webhook IDs with copy buttons and live
+  firing status. Guides user through creating one Custom Webhook Alarm Manager
+  rule per row in Protect.
+- **Logs** — tails `/config/camproxy.log` with password redaction.
+
+### Full mode (`:full`, legacy)
 
 Five tabs at `http://<docker-host>:8091/`:
 
@@ -136,6 +162,24 @@ Five tabs at `http://<docker-host>:8091/`:
 
 ## Configuration reference
 
+Minimum `config/config.yml` for bridge mode:
+
+```yaml
+unifi:
+  host: 192.168.1.1
+  username: "your-unifi-os-username"
+  password: "your-unifi-os-password"
+  api_key: "your-protect-api-key"
+
+onvif:
+  username: "admin"
+  password: "password"
+  port: 80
+```
+
+Cameras are auto-discovered from Protect. Per-camera ONVIF credential overrides
+can be added under `cameras: [...]` (see `SECONDBRAIN.md`).
+
 Minimum `config/config.yml` for full mode:
 
 ```yaml
@@ -148,9 +192,6 @@ cameras:
   - name: "Front Door"
     rtsp_url: "rtsp://admin:password@192.168.1.50:554/stream1"
 ```
-
-Bridge mode config schema is still being finalised — see
-`SECONDBRAIN.md`.
 
 ## Troubleshooting
 
