@@ -130,6 +130,7 @@ subscription_tasks: Dict[str, asyncio.Task] = {}
 # Last discovery error, surfaced on the dashboard.
 last_discovery_error: str = ""
 last_discovery_epoch: float = 0.0
+is_discovering: bool = False
 
 
 # ── Discovery + reconciliation ─────────────────────────────────────────────
@@ -224,8 +225,12 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
         seen_ids.add(cam.protect_id)
         if cam.protect_id in subscription_tasks:
             existing = subscriptions.get(cam.protect_id)
+            if existing is not None and existing.auth_locked:
+                # Auth failed previously — don't auto-restart; user must
+                # update creds or press Retry to clear the lock.
+                continue
             if existing is not None and existing.onvif_host != cam.host:
-                # IP changed — restart the subscription
+                # IP changed — restart the subscription.
                 logger.info("Camera %s IP changed (%s → %s) — resubscribing",
                             cam.name, existing.onvif_host, cam.host)
                 subscription_tasks[cam.protect_id].cancel()
@@ -271,17 +276,28 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
         subscriptions.pop(stale_id, None)
 
 
-async def _discovery_loop(cfg: dict, pusher: ProtectPusher) -> None:
-    """Run reconciliation forever, with a steady cadence and clean
-    cancellation."""
+async def _discovery_loop(
+    cfg: dict, pusher: ProtectPusher, trigger: asyncio.Event,
+) -> None:
+    """Wait for a trigger event, run reconciliation, repeat.
+
+    trigger is pre-set before the task starts so the first discovery
+    runs immediately on startup without needing the user to press the
+    button.
+    """
+    global is_discovering
     while True:
+        await trigger.wait()
+        trigger.clear()
+        is_discovering = True
         try:
             await _reconcile(cfg, pusher)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.exception("Reconciliation loop hiccup")
-        await asyncio.sleep(DISCOVERY_INTERVAL_S)
+        finally:
+            is_discovering = False
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -313,28 +329,27 @@ async def main() -> None:
             state_provider = lambda: {  # noqa: E731 — short enough
                 "discovered_cameras": discovered_cameras,
                 "subscriptions": subscriptions,
-                # Exposed so the web UI can cancel a subscription after a
-                # cred change and let _reconcile re-create it with fresh
-                # creds on the next pass.
                 "subscription_tasks": subscription_tasks,
                 "pusher_stats": pusher.stats,
                 "last_discovery_error": last_discovery_error,
                 "last_discovery_epoch": last_discovery_epoch,
-                # Surfaced to the Setup tab so it can render the exact
-                # webhook IDs the bridge will fire.
+                "is_discovering": is_discovering,
                 "webhook_id_template": pusher.webhook_id_template,
             }
-            web = BridgeWebTool(cfg, state_provider)
+            web = BridgeWebTool(cfg, state_provider,
+                                trigger_discovery=discover_event.set)
             logger.info("Starting bridge web UI on port %d", port)
             web_task = asyncio.create_task(web.run(port), name="web")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bridge web UI failed to start: %s", exc)
 
-    # Discovery + reconciliation loop. The pusher logs in lazily on
-    # the first event, so a Protect outage at startup just delays the
-    # first push, doesn't crash the bridge.
+    # Event-driven discovery: pre-set so the first run happens on startup;
+    # the button in the web UI sets it again for manual re-discovery.
+    discover_event = asyncio.Event()
+    discover_event.set()
+
     discovery_task = asyncio.create_task(
-        _discovery_loop(cfg, pusher), name="discovery",
+        _discovery_loop(cfg, pusher, discover_event), name="discovery",
     )
 
     tasks: list[asyncio.Task] = [discovery_task]

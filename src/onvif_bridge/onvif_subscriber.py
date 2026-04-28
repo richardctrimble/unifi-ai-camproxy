@@ -50,9 +50,10 @@ class CameraSubscription:
     consecutive_failures: int = 0
     is_connected: bool = False
     last_error: str = ""
-    # Topic strings the camera advertised via GetEventProperties.
-    # Populated once after a successful subscription. Lets the Setup
-    # tab show users which kinds their cameras can actually emit.
+    # Set True when the subscription loop detects an auth failure.
+    # _reconcile skips restarting locked cameras; clearing requires
+    # a credential update or an explicit retry from the UI.
+    auth_locked: bool = False
     supported_topics: list[str] = field(default_factory=list)
 
 
@@ -136,6 +137,21 @@ def _parse_notification(msg) -> Optional[tuple[str, bool, dict]]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("Failed to parse ONVIF notification: %s", exc)
         return None
+
+
+# ── Auth-error detection ───────────────────────────────────────────────────
+
+_AUTH_NEEDLES = (
+    "401", "403",
+    "unauthorized", "authentication failed", "authentication error",
+    "access denied", "not authorized", "sender not authorized",
+    "invalid credentials", "wrong password",
+)
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(n in msg for n in _AUTH_NEEDLES)
 
 
 # ── Subscription loop ──────────────────────────────────────────────────────
@@ -298,6 +314,15 @@ async def subscribe_camera(
             sub.is_connected = False
             sub.consecutive_failures += 1
             sub.last_error = str(exc)[:200]
+            if _is_auth_error(exc):
+                sub.auth_locked = True
+                logger.warning(
+                    "ONVIF auth failed for %s (%s:%d): %s — "
+                    "stopping retries. Update credentials or use "
+                    "the Retry button in the ONVIF Creds tab.",
+                    sub.name, sub.onvif_host, sub.onvif_port, exc,
+                )
+                return
             logger.warning(
                 "ONVIF subscription error on %s (%s:%d): %s — retrying in %ds",
                 sub.name, sub.onvif_host, sub.onvif_port, exc, backoff,

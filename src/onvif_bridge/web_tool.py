@@ -178,7 +178,13 @@ _INDEX_HTML = """<!doctype html>
     <div class="grid" id="bridge-grid"><span class="empty">Loading…</span></div>
   </div>
   <div class="card">
-    <div class="card-header"><h3>Cameras (ONVIF) discovered in Protect</h3></div>
+    <div class="card-header">
+      <h3>Cameras discovered in Protect</h3>
+      <div class="btn-group">
+        <button class="btn btn-ghost btn-sm" id="btn-discover" onclick="triggerDiscover()">Get cameras from Protect</button>
+        <span class="status-msg" id="discover-msg"></span>
+      </div>
+    </div>
     <div id="cams-block"><span class="empty">Loading…</span></div>
   </div>
   <div class="card">
@@ -190,44 +196,45 @@ _INDEX_HTML = """<!doctype html>
 <div id="unifi" class="pane">
   <div class="card">
     <div class="card-header"><h3>UniFi Protect — connection settings</h3></div>
-    <p style="font-size:13px;color:#bbb;margin:0 0 14px;">
-      The bridge connects to Protect in two ways: (1) discovers ONVIF cameras via
-      username+password; (2) fires Alarm Manager webhooks via API key.
-      Changes are saved to <code>/config/config.yml</code>.
-    </p>
     <div id="unifi-msg"></div>
-    <h4>Host</h4>
     <div class="form-group">
       <label>Protect host / IP</label>
-      <input type="text" id="unifi-host" placeholder="192.168.2.1 or https://unifi.local">
+      <input type="text" id="unifi-host" placeholder="192.168.1.1 or https://unifi.local" autocomplete="off">
     </div>
-    <h4>Discovery login (username + password)</h4>
+    <h4 style="margin-top:18px;">Camera discovery login</h4>
+    <p style="font-size:12px;color:#888;margin:0 0 10px;">
+      UniFi OS account used to query Protect for adopted ONVIF cameras.
+      Must be a <strong style="color:#bbb;">UniFi OS account</strong> — not a Protect-app-only account.
+      Leave password blank to keep the existing saved value.
+    </p>
     <div class="form-group">
       <label>Username</label>
-      <input type="text" id="unifi-username" placeholder="admin" autocomplete="username">
+      <input type="text" id="unifi-username" placeholder="admin" autocomplete="off">
     </div>
     <div class="form-group">
       <label>Password</label>
-      <input type="password" id="unifi-password" placeholder="password" autocomplete="current-password">
+      <input type="password" id="unifi-password" placeholder="(leave blank to keep existing)" autocomplete="new-password">
     </div>
     <div class="btn-group" style="margin-top:8px;">
       <button class="btn btn-ghost btn-sm" id="btn-test-userpass">Test login</button>
       <span class="status-msg" id="test-userpass-result"></span>
     </div>
-    <h4 style="margin-top:18px;">API key (Alarm Manager webhooks)</h4>
-    <p style="font-size:12px;color:#888;margin:0 0 8px;">
+    <h4 style="margin-top:18px;">API key — Alarm Manager webhooks</h4>
+    <p style="font-size:12px;color:#888;margin:0 0 10px;">
+      Used to fire webhooks into Protect's Alarm Manager when ONVIF events arrive.
       Generate in Protect → Settings → Control Plane → Integrations → Create API Key.
+      Leave blank to keep the existing saved value.
     </p>
     <div class="form-group">
       <label>API key</label>
-      <input type="password" id="unifi-apikey" placeholder="paste API key">
+      <input type="password" id="unifi-apikey" placeholder="(leave blank to keep existing)" autocomplete="new-password">
     </div>
     <div class="btn-group" style="margin-top:8px;">
       <button class="btn btn-ghost btn-sm" id="btn-test-apikey">Test API key</button>
       <span class="status-msg" id="test-apikey-result"></span>
     </div>
     <div class="btn-group" style="margin-top:18px;border-top:1px solid #333;padding-top:14px;">
-      <button class="btn" id="btn-save-unifi">Save to config.yml</button>
+      <button class="btn" id="btn-save-unifi">Save</button>
       <span class="status-msg" id="save-unifi-result"></span>
     </div>
   </div>
@@ -339,6 +346,12 @@ async function refreshStatus(){
     }
     var data=await resp.json();
     var b=data.build||{};var bridge=data.bridge||{};
+    var btn=document.getElementById('btn-discover');
+    if(data.is_discovering){
+      btn.disabled=true;btn.textContent='Discovering…';
+    }else{
+      btn.disabled=false;btn.textContent='Get cameras from Protect';
+    }
     if(bridge.last_discovery_error){
       banner.innerHTML='<div class="alert alert-err">Discovery error: '+esc(bridge.last_discovery_error)+' — <a href="#" onclick="switchTab(&apos;unifi&apos;);return false;" style="color:#fca5a5;">Fix in UniFi tab →</a></div>';
     }else{banner.innerHTML='';}
@@ -380,8 +393,12 @@ async function loadUnifi(){
     var d=await(await fetch('/api/config/unifi')).json();
     document.getElementById('unifi-host').value=d.host||'';
     document.getElementById('unifi-username').value=d.username||'';
-    document.getElementById('unifi-password').value=d.password||'';
-    document.getElementById('unifi-apikey').value=d.api_key||'';
+    // Passwords are never pre-filled — leave blank to keep existing saved value.
+    // Show a hint when a password is already saved.
+    var pwdEl=document.getElementById('unifi-password');
+    pwdEl.placeholder=d.has_password?'(saved — leave blank to keep)':'(not set)';
+    var keyEl=document.getElementById('unifi-apikey');
+    keyEl.placeholder=d.has_api_key?'(saved — leave blank to keep)':'(not set)';
   }catch(e){setMsg('save-unifi-result',false,'Could not load config: '+e);}
 }
 
@@ -433,29 +450,33 @@ async function loadCamOnvif(){
     if(!cams.length){el.innerHTML='<span class="empty">No cameras discovered yet — populates after the first successful Protect discovery.</span>';return;}
     var html='';
     cams.forEach(function(c){
-      var statCls=c.is_connected?'ok':'warn';var statTxt=c.is_connected?'connected':(c.last_error?'error':'connecting…');
+      var statCls=c.auth_locked?'err':(c.is_connected?'ok':'warn');
+      var statTxt=c.auth_locked?'auth failed':(c.is_connected?'connected':(c.last_error?'error':'connecting…'));
       var topics=c.supported_topics&&c.supported_topics.length?c.supported_topics.map(function(t){return '<span class="topic-pill">'+esc(t)+'</span>';}).join(' '):'<span class="empty">no topics advertised yet</span>';
       var userPh=c.fleet_username?'fleet: '+esc(c.fleet_username):'(fleet creds unset)';
       var portPh=c.fleet_port||80;
+      var retryBtn=c.auth_locked?'<button class="btn btn-sm cam-retry" style="background:#7f1d1d;color:#fca5a5;">Retry auth</button>':'';
       html+='<div class="cam-onvif-row" data-pid="'+esc(c.protect_id)+'">'
         +'<div class="cam-onvif-head">'
         +'<span class="cam-name">'+esc(c.name)+'</span>'
         +'<span class="cam-host"><code>'+esc(c.host||'?')+'</code></span>'
         +'<span class="cam-status '+statCls+'">'+esc(statTxt)+'</span>'
+        +(c.auth_locked&&c.last_error?'<span class="err" style="font-size:11px;">'+esc(c.last_error.slice(0,80))+'</span>':'')
         +'</div>'
         +'<div class="cam-onvif-fields">'
         +'<input type="text" class="cam-user" value="'+esc(c.override_username||'')+'" placeholder="'+userPh+'" autocomplete="off">'
         +'<input type="password" class="cam-pass" value="'+esc(c.override_password||'')+'" placeholder="(inherit fleet password)" autocomplete="new-password">'
         +'<input type="text" class="cam-port" value="'+esc(c.override_port||'')+'" placeholder="'+portPh+'">'
         +'<button class="btn btn-sm cam-save">Save</button>'
+        +retryBtn
         +'</div>'
         +'<div class="cam-onvif-topics"><div class="topic-list">'+topics+'</div></div>'
         +'<div class="status-msg cam-msg" style="margin-top:4px;"></div>'
         +'</div>';
     });el.innerHTML=html;
     el.querySelectorAll('.cam-onvif-row').forEach(function(row){
-      var btn=row.querySelector('.cam-save');
-      btn.addEventListener('click',async function(){
+      var saveBtn=row.querySelector('.cam-save');
+      saveBtn.addEventListener('click',async function(){
         var pid=row.dataset.pid;
         var user=row.querySelector('.cam-user').value.trim();
         var pass=row.querySelector('.cam-pass').value;
@@ -469,6 +490,19 @@ async function loadCamOnvif(){
           msg.textContent=r.message||(r.ok?'Saved':'Failed');
         }catch(e){msg.className='status-msg cam-msg err';msg.textContent='Save failed: '+e;}
       });
+      var retryBtn=row.querySelector('.cam-retry');
+      if(retryBtn){retryBtn.addEventListener('click',async function(){
+        var pid=row.dataset.pid;
+        var msg=row.querySelector('.cam-msg');
+        retryBtn.disabled=true;retryBtn.textContent='Retrying…';
+        msg.className='status-msg cam-msg ok';msg.textContent='';
+        try{
+          var r=await(await fetch('/api/cameras/onvif/retry',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({protect_id:pid})})).json();
+          msg.className='status-msg cam-msg '+(r.ok?'ok':'err');
+          msg.textContent=r.message||(r.ok?'Retrying…':'Failed');
+          if(r.ok)setTimeout(loadCamOnvif,2000);
+        }catch(e){msg.className='status-msg cam-msg err';msg.textContent='Retry failed: '+e;retryBtn.disabled=false;retryBtn.textContent='Retry auth';}
+      });}
     });
   }catch(e){
     el.innerHTML='<div class="alert alert-err">Failed to load camera ONVIF data: '+esc(String(e))+'</div>';
@@ -502,6 +536,21 @@ document.getElementById('log-refresh').addEventListener('click',refreshLogs);
 var logTimer;
 document.getElementById('log-auto').addEventListener('change',function(e){clearInterval(logTimer);if(e.target.checked)logTimer=setInterval(refreshLogs,3000);});
 
+async function triggerDiscover(){
+  var btn=document.getElementById('btn-discover');
+  var msg=document.getElementById('discover-msg');
+  btn.disabled=true;btn.textContent='Querying…';
+  msg.className='status-msg ok';msg.textContent='';
+  try{
+    var r=await(await fetch('/api/discover',{method:'POST'})).json();
+    msg.className='status-msg '+(r.ok?'ok':'err');
+    msg.textContent=r.message||'';
+  }catch(e){
+    msg.className='status-msg err';msg.textContent='Request failed: '+e;
+    btn.disabled=false;btn.textContent='Get cameras from Protect';
+  }
+}
+
 refreshStatus();
 setInterval(refreshStatus,3000);
 setInterval(function(){if(document.querySelector('[data-pane="setup"].active'))refreshSetup();},5000);
@@ -517,15 +566,19 @@ setInterval(function(){
 class BridgeWebTool:
     """Five-tab web app: Status, UniFi Creds, ONVIF Creds, Setup, Logs."""
 
-    def __init__(self, config: dict, state_provider: Callable[[], dict]):
+    def __init__(self, config: dict, state_provider: Callable[[], dict],
+                 trigger_discovery: Callable[[], None] | None = None):
         self.config = config
         self._state_provider = state_provider
+        self._trigger_discovery = trigger_discovery or (lambda: None)
         self._start_time = time.monotonic()
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/status", self._status)
         self.app.router.add_get("/api/setup", self._setup)
         self.app.router.add_get("/api/logs", self._logs)
+        self.app.router.add_post("/api/discover", self._post_discover)
+        self.app.router.add_post("/api/cameras/onvif/retry", self._post_camera_retry)
         self.app.router.add_get("/api/cameras/topics", self._camera_topics)
         self.app.router.add_get("/api/cameras/onvif", self._get_camera_onvif)
         self.app.router.add_post("/api/cameras/onvif", self._post_camera_onvif)
@@ -553,8 +606,10 @@ class BridgeWebTool:
         return web.json_response({
             "host": cfg.get("host", ""),
             "username": cfg.get("username", ""),
-            "password": cfg.get("password", ""),
-            "api_key": cfg.get("api_key", ""),
+            # Never send secrets back to the browser — just tell it whether
+            # a value is saved so the placeholder can say "(saved)".
+            "has_password": bool(cfg.get("password", "")),
+            "has_api_key": bool(cfg.get("api_key", "")),
         })
 
     async def _post_unifi(self, request: web.Request) -> web.Response:
@@ -566,17 +621,24 @@ class BridgeWebTool:
         cfg = self.config.setdefault("unifi", {})
         if not isinstance(cfg, dict):
             self.config["unifi"] = cfg = {}
+        # Always update host and username (they're not secret).
         cfg["host"] = str(body.get("host", "")).strip()
         cfg["username"] = str(body.get("username", "")).strip()
-        cfg["password"] = str(body.get("password", ""))
-        cfg["api_key"] = str(body.get("api_key", "")).strip()
+        # Only overwrite password / api_key when the field was actually filled in —
+        # blank means "keep existing saved value".
+        password = str(body.get("password", ""))
+        if password:
+            cfg["password"] = password
+        api_key = str(body.get("api_key", "")).strip()
+        if api_key:
+            cfg["api_key"] = api_key
         try:
             self._save_config()
         except RuntimeError as exc:
             return web.json_response({"ok": False, "message": str(exc)})
         return web.json_response({
             "ok": True,
-            "message": "Saved. Discovery will pick up new credentials on the next 60s cycle.",
+            "message": "Saved. Use 'Get cameras from Protect' on the Status tab to discover cameras.",
         })
 
     async def _get_onvif(self, _: web.Request) -> web.Response:
@@ -769,6 +831,7 @@ class BridgeWebTool:
                 "fleet_username": fleet.get("username", ""),
                 "fleet_port": int(fleet.get("port", 80)),
                 "is_connected": bool(sub and sub.is_connected),
+                "auth_locked": bool(sub and sub.auth_locked),
                 "last_error": sub.last_error if sub else "",
                 "supported_topics": (sub.supported_topics if sub else []) or [],
             })
@@ -837,6 +900,35 @@ class BridgeWebTool:
             "message": "Saved. Resubscribing with new credentials…",
         })
 
+    async def _post_camera_retry(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        pid = str(body.get("protect_id", "")).strip()
+        if not pid:
+            return web.json_response({"ok": False, "message": "protect_id required"})
+        self._cancel_subscriptions([pid])
+        self._trigger_discovery()
+        return web.json_response({
+            "ok": True,
+            "message": "Retrying connection…",
+        })
+
+    async def _post_discover(self, _: web.Request) -> web.Response:
+        state = self._state_provider()
+        if state.get("is_discovering"):
+            return web.json_response({
+                "ok": True,
+                "message": "Discovery already in progress…",
+            })
+        self._trigger_discovery()
+        return web.json_response({
+            "ok": True,
+            "message": "Querying Protect for cameras…",
+        })
+
     async def _status(self, _: web.Request) -> web.Response:
         state = self._state_provider()
         subs = state.get("subscriptions") or {}
@@ -880,6 +972,7 @@ class BridgeWebTool:
             "build": get_build_info(),
             "variant": "onvif",
             "uptime_seconds": int(time.monotonic() - self._start_time),
+            "is_discovering": bool(state.get("is_discovering")),
             "cameras": state.get("discovered_cameras", []),
             "subscriptions": sub_payload,
             "pusher_stats": ps_payload,
