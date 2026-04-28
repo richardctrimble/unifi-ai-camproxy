@@ -32,6 +32,7 @@ import yaml
 from aiohttp import web
 
 from build_info import get_build_info
+from onvif_bridge.onvif_subscriber import classify_topic
 
 logger = logging.getLogger("onvif_bridge.web")
 
@@ -297,7 +298,9 @@ _INDEX_HTML = """<!doctype html>
     <div style="font-size:13px;color:#bbb;margin-bottom:10px;">
       Protect's integration API doesn't expose alarm-rule CRUD, so each rule must be created
       in the Protect UI. The bridge fires the webhook IDs listed below; create one matching
-      alarm rule per row you care about. Active template: <code id="setup-template">—</code>.
+      alarm rule per row you care about. Rows are filtered to event kinds the camera actually
+      advertises via ONVIF — if a camera hasn't enumerated its topics yet, all kinds are shown
+      as a fallback. Active template: <code id="setup-template">—</code>.
     </div>
     <h4>One-time setup per row</h4>
     <ol class="steps">
@@ -1061,13 +1064,32 @@ class BridgeWebTool:
         state = self._state_provider()
         template = state.get("webhook_id_template") or DEFAULT_WEBHOOK_TEMPLATE
         cams = state.get("discovered_cameras", []) or []
+        subs = state.get("subscriptions") or {}
         ps = state.get("pusher_stats")
         wstats: dict = getattr(ps, "webhook_stats", {}) if ps is not None else {}
         rows = []
         for cam in cams:
             protect_id = cam.get("protect_id", "")
             name = cam.get("name", "")
-            for kind in SUPPORTED_KINDS:
+            # Filter the kind list to what this camera actually advertises
+            # via ONVIF GetEventProperties. If the subscription hasn't yet
+            # enumerated topics (still connecting, restricted to admins, or
+            # the camera doesn't implement GetEventProperties), fall back to
+            # showing every kind so the user can still wire something up.
+            sub = subs.get(protect_id)
+            topics = (sub.supported_topics if sub else None) or []
+            if topics:
+                kinds_for_cam = {classify_topic(t) for t in topics}
+                kinds_for_cam.discard("unknown")
+                rendered_kinds = [k for k in SUPPORTED_KINDS if k in kinds_for_cam]
+                # If the camera's topics classify to nothing we recognise,
+                # fall through to all kinds rather than hiding the camera
+                # entirely — better to show too much than too little.
+                if not rendered_kinds:
+                    rendered_kinds = list(SUPPORTED_KINDS)
+            else:
+                rendered_kinds = list(SUPPORTED_KINDS)
+            for kind in rendered_kinds:
                 wid = _format_webhook_id(template, protect_id, kind, name)
                 ws = wstats.get(wid)
                 rows.append({
