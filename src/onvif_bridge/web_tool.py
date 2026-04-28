@@ -98,7 +98,9 @@ _INDEX_HTML = """<!doctype html>
  ol.steps li { margin-bottom:6px; }
  .cam-row { display:grid; grid-template-columns:2fr 1.4fr 1fr 1fr 1fr 1.2fr; gap:8px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
  .cam-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
- .setup-row { display:grid; grid-template-columns:1.4fr 1fr 0.6fr 2.4fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
+ .setup-row { display:grid; grid-template-columns:0.4fr 1.4fr 1fr 0.6fr 2.4fr 1fr; gap:10px; padding:6px 0; border-bottom:1px solid #2a2a2a; font-size:13px; align-items:center; word-break:break-word; }
+ .setup-row input[type="checkbox"] { width:16px; height:16px; cursor:pointer; accent-color:#4a90e2; }
+ .setup-row.disabled { opacity:0.55; }
  .setup-row.header { color:#888; font-weight:600; border-bottom:1px solid #444; }
  pre#log-output { background:#111; border:1px solid #333; border-radius:4px; padding:10px; max-height:65vh; overflow:auto; font-size:12px; line-height:1.4; white-space:pre-wrap; word-break:break-all; margin:0; }
  .form-group { display:grid; grid-template-columns:140px 1fr; gap:8px; align-items:center; margin-bottom:10px; font-size:13px; }
@@ -321,7 +323,10 @@ _INDEX_HTML = """<!doctype html>
       in the Protect UI. The bridge fires the webhook IDs listed below; create one matching
       alarm rule per row you care about. Rows are filtered to event kinds the camera actually
       advertises via ONVIF — if a camera hasn't enumerated its topics yet, all kinds are shown
-      as a fallback. Active template: <code id="setup-template">—</code>.
+      as a fallback. Use the <strong>Fire</strong> checkbox to enable or disable each webhook
+      (unchecked = bridge skips it, even if the camera fires events). The <strong>Events</strong>
+      column shows how many times each kind has been seen since the bridge started. Active
+      template: <code id="setup-template">—</code>.
     </div>
     <h4>One-time setup per row</h4>
     <ol class="steps">
@@ -596,16 +601,27 @@ async function refreshSetup(){
     document.getElementById('setup-template').textContent=data.webhook_id_template||'—';
     var rows=data.rows||[];
     if(!rows.length){el.innerHTML='<span class="empty">No cameras yet — Setup populates after the first successful discovery.</span>';return;}
-    var html='<div class="table-scroll"><div class="setup-row header"><span>Camera</span><span>Kind</span><span>Events</span><span>Webhook ID</span><span>Status</span></div>';
+    var html='<div class="table-scroll"><div class="setup-row header"><span title="Tick to fire this webhook to Protect">Fire</span><span>Camera</span><span>Kind</span><span>Events</span><span>Webhook ID</span><span>Status</span></div>';
     rows.forEach(function(r){
       var status,statusCls;
       if(r.fires_ok>0){status='firing — last '+fmtAgo(r.last_fire_epoch)+' ('+r.fires_ok+' total)';statusCls='ok';}
       else if(r.fires_failed>0){status='failing — HTTP '+(r.last_status||'?')+' ('+r.fires_failed+' failures)';statusCls='err';}
       else{status='not yet fired';statusCls='label';}
       var evCount=r.events_seen||0;
-      html+='<div class="setup-row"><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Events" title="Events of this kind seen since the bridge started">'+evCount+'</span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
+      var enabled=r.enabled!==false;
+      var rowCls=enabled?'setup-row':'setup-row disabled';
+      var chk='<input type="checkbox" class="alarm-toggle" data-wid="'+esc(r.webhook_id)+'"'+(enabled?' checked':'')+' title="Tick to fire this webhook to Protect">';
+      html+='<div class="'+rowCls+'"><span data-label="Fire">'+chk+'</span><span data-label="Camera">'+esc(r.camera_name)+'</span><span data-label="Kind"><span class="pill kind-'+esc(r.kind)+'">'+esc(r.kind)+'</span></span><span data-label="Events" title="Events of this kind seen since the bridge started">'+evCount+'</span><span data-label="Webhook ID" class="copy-row"><code>'+esc(r.webhook_id)+'</code><button class="copy-btn" data-copy="'+esc(r.webhook_id)+'">Copy</button></span><span data-label="Status" class="'+statusCls+'">'+esc(status)+'</span></div>';
     });html+='</div>';el.innerHTML=html;
     el.querySelectorAll('.copy-btn').forEach(function(b){b.addEventListener('click',async function(){try{await navigator.clipboard.writeText(b.dataset.copy);b.classList.add('copied');var prev=b.textContent;b.textContent='Copied!';setTimeout(function(){b.classList.remove('copied');b.textContent=prev;},1200);}catch(e){var range=document.createRange();range.selectNode(b.previousElementSibling);window.getSelection().removeAllRanges();window.getSelection().addRange(range);}});});
+    el.querySelectorAll('.alarm-toggle').forEach(function(cb){cb.addEventListener('change',async function(){
+      var wid=cb.dataset.wid;var en=cb.checked;cb.disabled=true;
+      try{var resp=await fetch('/api/alarms/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({webhook_id:wid,enabled:en})});var j=await resp.json();
+        if(!j.ok){cb.checked=!en;alert('Toggle failed: '+(j.message||'unknown'));}
+        else{var row=cb.closest('.setup-row');if(row){row.classList.toggle('disabled',!en);}}
+      }catch(e){cb.checked=!en;alert('Toggle failed: '+e);}
+      finally{cb.disabled=false;}
+    });});
   }catch(e){
     el.innerHTML='<div class="alert alert-err">Failed to load setup data: '+esc(String(e))+'</div>';
   }
@@ -661,15 +677,18 @@ class BridgeWebTool:
     """Five-tab web app: Status, UniFi Creds, ONVIF Creds, Setup, Logs."""
 
     def __init__(self, config: dict, state_provider: Callable[[], dict],
-                 trigger_discovery: Callable[[], None] | None = None):
+                 trigger_discovery: Callable[[], None] | None = None,
+                 pusher=None):
         self.config = config
         self._state_provider = state_provider
         self._trigger_discovery = trigger_discovery or (lambda: None)
+        self._pusher = pusher  # used by /api/alarms/toggle
         self._start_time = time.monotonic()
         self.app = web.Application()
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/api/status", self._status)
         self.app.router.add_get("/api/setup", self._setup)
+        self.app.router.add_post("/api/alarms/toggle", self._post_alarm_toggle)
         self.app.router.add_get("/api/logs", self._logs)
         self.app.router.add_delete("/api/logs", self._clear_logs)
         self.app.router.add_post("/api/discover", self._post_discover)
@@ -1121,6 +1140,7 @@ class BridgeWebTool:
             else:
                 rendered_kinds = list(SUPPORTED_KINDS)
             event_counts = sub.event_counts if sub else {}
+            disabled = self._disabled_webhooks_set()
             for kind in rendered_kinds:
                 wid = _format_webhook_id(template, protect_id, kind, name)
                 ws = wstats.get(wid)
@@ -1129,6 +1149,7 @@ class BridgeWebTool:
                     "camera_protect_id": protect_id,
                     "kind": kind,
                     "webhook_id": wid,
+                    "enabled": wid not in disabled,
                     "events_seen": int(event_counts.get(kind, 0)),
                     "fires_ok": ws.fires_ok if ws else 0,
                     "fires_failed": ws.fires_failed if ws else 0,
@@ -1140,6 +1161,48 @@ class BridgeWebTool:
             "supported_kinds": SUPPORTED_KINDS,
             "rows": rows,
         })
+
+    def _disabled_webhooks_set(self) -> set:
+        """Return the set of webhook IDs the user has disabled in the
+        Alarm Setup tab. Source of truth is config['alarms']['disabled_webhooks'];
+        the pusher mirrors it for the runtime check."""
+        alarms = self.config.get("alarms") or {}
+        return set(alarms.get("disabled_webhooks") or [])
+
+    async def _post_alarm_toggle(self, request: web.Request) -> web.Response:
+        """Enable or disable an individual webhook ID.
+
+        Body: ``{"webhook_id": "...", "enabled": true|false}``.
+        Mirrors the change into the running pusher so the next event is
+        either fired or skipped immediately, and persists to config.yml.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "message": "invalid JSON"},
+                                    status=400)
+        wid = str(body.get("webhook_id", "")).strip()
+        if not wid:
+            return web.json_response({"ok": False,
+                                      "message": "webhook_id is required"})
+        enabled = bool(body.get("enabled", True))
+
+        alarms = self.config.setdefault("alarms", {})
+        if not isinstance(alarms, dict):
+            self.config["alarms"] = alarms = {}
+        disabled = set(alarms.get("disabled_webhooks") or [])
+        if enabled:
+            disabled.discard(wid)
+        else:
+            disabled.add(wid)
+        alarms["disabled_webhooks"] = sorted(disabled)
+        if self._pusher is not None:
+            self._pusher.disabled_webhooks = disabled
+        try:
+            self._save_config()
+        except RuntimeError as exc:
+            return web.json_response({"ok": False, "message": str(exc)})
+        return web.json_response({"ok": True, "enabled": enabled})
 
     async def _logs(self, request: web.Request) -> web.Response:
         try:

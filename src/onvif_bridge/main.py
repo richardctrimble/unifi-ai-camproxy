@@ -46,6 +46,11 @@ from unifi_auth import UniFiAuthError  # noqa: E402
 
 CONFIG_PATH = Path("/config/config.yml")
 
+# Persisted snapshot of the last successful discovery. Loaded on startup
+# so subscriptions resume immediately without re-querying Protect; saved
+# after every reconciliation that produces a non-empty camera list.
+STATE_PATH = Path("/config/state.yml")
+
 # How often to re-poll Protect for new / removed cameras.
 DISCOVERY_INTERVAL_S = 60
 
@@ -103,6 +108,40 @@ def load_config() -> dict:
         logger.error("Config root is not a YAML mapping: %s", CONFIG_PATH)
         return {}
     return cfg
+
+
+def load_state() -> dict:
+    """Load the persisted discovery snapshot, if any.
+
+    Returns an empty dict when no state file exists or it can't be parsed —
+    we'd rather start with an empty camera list than crash on bad YAML.
+    """
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        with open(STATE_PATH) as f:
+            state = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, OSError) as e:
+        logger.warning("Could not read %s: %s — ignoring", STATE_PATH, e)
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def save_state(cameras: list[dict], epoch: float) -> None:
+    """Write the latest discovery snapshot to /config/state.yml.
+
+    Best-effort: log and continue on write failures so a read-only mount
+    or full disk doesn't take the bridge down.
+    """
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {"cameras": cameras, "last_discovery_epoch": epoch},
+                f, default_flow_style=False, sort_keys=False,
+            )
+    except OSError as e:
+        logger.warning("Could not save %s: %s", STATE_PATH, e)
 
 
 # ── Banner ─────────────────────────────────────────────────────────────────
@@ -296,6 +335,70 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
         f", {locked_count} auth-locked (use Retry button)" if locked_count else "",
     )
 
+    # Persist the camera list so the bridge can resume subscriptions on
+    # the next start without re-querying Protect.
+    if discovered_cameras:
+        save_state(discovered_cameras, last_discovery_epoch)
+
+
+def _restore_from_state(cfg: dict, pusher: ProtectPusher) -> int:
+    """Re-create subscriptions from the persisted state file, if any.
+
+    Returns the number of subscriptions started. Cameras whose ONVIF
+    creds aren't yet configured are still listed (so the dashboard
+    shows them) but no subscription is started until the user fills
+    in the credentials.
+    """
+    global discovered_cameras, last_discovery_epoch
+
+    state = load_state()
+    cams_raw = state.get("cameras") if isinstance(state, dict) else None
+    if not isinstance(cams_raw, list) or not cams_raw:
+        return 0
+
+    discovered_cameras = [c for c in cams_raw if isinstance(c, dict)]
+    last_discovery_epoch = float(state.get("last_discovery_epoch") or 0)
+
+    started = 0
+    for cam_dict in discovered_cameras:
+        protect_id = cam_dict.get("protect_id") or ""
+        if not protect_id or protect_id in subscription_tasks:
+            continue
+        # Reuse the same per-camera ONVIF cred resolver as discovery.
+        cam = DiscoveredCamera(
+            protect_id=protect_id,
+            name=cam_dict.get("name") or "<unnamed>",
+            host=cam_dict.get("host") or "",
+            mac=cam_dict.get("mac") or "",
+            model_key=cam_dict.get("model_key") or "",
+            type=cam_dict.get("type") or "",
+            state=cam_dict.get("state") or "",
+            is_adopted=bool(cam_dict.get("is_adopted", True)),
+        )
+        u, p, port = _onvif_creds_for(cam, cfg)
+        if not (u and p and cam.host):
+            logger.info(
+                "Restored %s but skipping subscription — no creds or host",
+                cam.name,
+            )
+            continue
+        sub = CameraSubscription(
+            protect_id=cam.protect_id, name=cam.name,
+            onvif_host=cam.host, onvif_port=port,
+            username=u, password=p,
+        )
+        subscriptions[cam.protect_id] = sub
+        subscription_tasks[cam.protect_id] = asyncio.create_task(
+            _run_subscription(sub, pusher),
+            name=f"onvif-sub-{cam.name}",
+        )
+        started += 1
+        logger.info("Restored ONVIF subscription for %s (%s:%d)",
+                    cam.name, cam.host, port)
+    logger.info("Restored %d camera(s) from %s — press 'Get cameras from "
+                "Protect' to refresh", started, STATE_PATH)
+    return started
+
 
 async def _discovery_loop(
     cfg: dict, pusher: ProtectPusher, trigger: asyncio.Event,
@@ -333,11 +436,22 @@ async def main() -> None:
     alarms_cfg = cfg.get("alarms", {}) or {}
     webhook_template = alarms_cfg.get("webhook_id_template") or ""
 
+    # Pre-populate the disabled-webhooks set from config so the pusher
+    # respects the user's saved enable/disable choices from the moment
+    # the first event arrives.
+    disabled_webhooks = set(alarms_cfg.get("disabled_webhooks") or [])
+
     pusher = ProtectPusher(
         host=host, api_key=api_key,
         webhook_id_template=webhook_template,
+        disabled_webhooks=disabled_webhooks,
     )
     await pusher.start()
+
+    # Restore the previously-discovered camera list (if any) and re-start
+    # subscriptions for them. Lets the bridge resume immediately on
+    # restart without forcing the user to press "Get cameras from Protect".
+    _restore_from_state(cfg, pusher)
 
     # Event-driven discovery: only fires when the user presses
     # "Get cameras from Protect". Not pre-set — bridge starts idle.
@@ -361,7 +475,8 @@ async def main() -> None:
                 "webhook_id_template": pusher.webhook_id_template,
             }
             web = BridgeWebTool(cfg, state_provider,
-                                trigger_discovery=discover_event.set)
+                                trigger_discovery=discover_event.set,
+                                pusher=pusher)
             logger.info("Starting bridge web UI on port %d", port)
             web_task = asyncio.create_task(web.run(port), name="web")
         except Exception as exc:  # noqa: BLE001

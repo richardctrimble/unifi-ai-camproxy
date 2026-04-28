@@ -98,12 +98,19 @@ class ProtectPusher:
         host: str,
         api_key: str,
         webhook_id_template: str = DEFAULT_WEBHOOK_ID_TEMPLATE,
+        disabled_webhooks: Optional[set] = None,
     ):
         self._base = host if host.startswith("http") else f"https://{host}"
         self._api_key = api_key
         # Public so the web UI Setup tab can render the exact IDs we'll fire.
         self.webhook_id_template = (
             webhook_id_template or DEFAULT_WEBHOOK_ID_TEMPLATE
+        )
+        # Webhook IDs the user has explicitly disabled in the Alarm Setup
+        # tab. Mutable from the outside (web_tool toggles entries on / off
+        # at runtime) so we don't snapshot.
+        self.disabled_webhooks: set = (
+            disabled_webhooks if disabled_webhooks is not None else set()
         )
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
@@ -189,6 +196,15 @@ class ProtectPusher:
             return outcome
 
         webhook_id = self._webhook_id(event)
+        if webhook_id in self.disabled_webhooks:
+            outcome = PushOutcome(
+                ok=True, method="skipped",
+                message="webhook disabled in Alarm Setup tab",
+                webhook_id=webhook_id,
+            )
+            self.stats.last_outcome = outcome
+            self.stats.last_outcome_epoch = time.time()
+            return outcome
         outcome = await self._fire(webhook_id)
         outcome.webhook_id = webhook_id
 
