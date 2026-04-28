@@ -190,9 +190,9 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
     pwd = unifi_cfg.get("password", "")
     api_key = unifi_cfg.get("api_key", "")
 
-    if not host or not (user and pwd):
-        last_discovery_error = "missing unifi host / username / password"
-        logger.warning("Discovery skipped: missing unifi host / username / password in config")
+    if not host or not ((user and pwd) or api_key):
+        last_discovery_error = "missing unifi host — need username+password or api_key in config"
+        logger.warning("Discovery skipped: %s", last_discovery_error)
         return
 
     logger.info("Discovery starting — querying Protect at %s", host)

@@ -111,14 +111,27 @@ async def discover_adopted_onvif_cameras(
         logger.warning("Could not list cameras from Protect: %s", exc)
         return []
 
+    logger.info("Protect returned %d total camera record(s)", len(raw))
+
     out: list[DiscoveredCamera] = []
     for cam in raw:
         if not isinstance(cam, dict):
             continue
+        name = cam.get("name") or cam.get("id") or "?"
         if not cam.get("isAdopted"):
+            logger.debug("Skipping %s — not adopted (isAdopted=%s)", name, cam.get("isAdopted"))
             continue
         if not identify_onvif_camera(cam):
+            logger.debug(
+                "Skipping %s — not identified as ONVIF (isThirdPartyCamera=%s, type=%r)",
+                name, cam.get("isThirdPartyCamera"), cam.get("type") or cam.get("displayName"),
+            )
             continue
+        logger.info(
+            "Found ONVIF camera: %s (id=%s, host=%s, isThirdPartyCamera=%s, type=%r)",
+            name, cam.get("id"), cam.get("host"),
+            cam.get("isThirdPartyCamera"), cam.get("type") or cam.get("displayName"),
+        )
         out.append(DiscoveredCamera(
             protect_id=cam.get("id") or "",
             name=cam.get("name") or "<unnamed>",
@@ -129,4 +142,12 @@ async def discover_adopted_onvif_cameras(
             state=cam.get("state") or "",
             is_adopted=True,
         ))
+
+    if not out:
+        logger.warning(
+            "No ONVIF cameras found in Protect. "
+            "If your cameras are adopted but not showing up, check that "
+            "isThirdPartyCamera=true in Protect (or that their type does not start with 'UVC '). "
+            "Set LOG_LEVEL=DEBUG to see why each camera was skipped.",
+        )
     return out

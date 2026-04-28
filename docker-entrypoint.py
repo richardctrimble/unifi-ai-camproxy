@@ -8,8 +8,7 @@ mode (ONVIF bridge by default, full spoof+inference if requested).
 
 Logic:
   1. If /config/config.yml already exists AND UNIFI_HOST is set ->
-     UNIFI_HOST is always applied (controller can move); credentials
-     (username/password/api_key) are only seeded if the field is
+     all env vars are seed-only: only applied when the config field is
      currently empty, so web-UI-saved values survive container upgrades.
      Cameras and other settings are never touched.
   2. If /config/config.yml already exists and no UNIFI_HOST is set ->
@@ -44,11 +43,10 @@ CONFIG_PATH = Path("/config/config.yml")
 def apply_env_overrides():
     """Seed an existing config.yml from env vars where fields are missing.
 
-    UNIFI_HOST always updates (controller location can legitimately change).
-    Credentials (username, password, api_key, token) and ONVIF creds are only
-    written when the config field is currently empty — once saved via the web
-    UI or a previous run they are left untouched, so a container upgrade never
-    silently overwrites them.
+    All env vars (host, credentials, ONVIF creds) are seed-only: they are
+    only written when the config field is currently empty — once saved via the
+    web UI or a previous run they are left untouched, so a container upgrade
+    never silently overwrites user settings.
     Cameras, AI settings, web_tool, and everything else are always preserved.
     """
     host = os.environ.get("UNIFI_HOST")
@@ -69,7 +67,7 @@ def apply_env_overrides():
     unifi = cfg.setdefault("unifi", {})
     changed = False
 
-    if unifi.get("host") != host:
+    if not unifi.get("host"):
         unifi["host"] = host
         changed = True
 
