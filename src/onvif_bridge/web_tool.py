@@ -456,7 +456,10 @@ async function refreshStatus(){
         else{subStat='connecting…';subCls='warn';}
         var errIndicator=(sub&&sub.last_error&&!sub.auth_locked)?'<span class="err" title="'+esc(sub.last_error)+'"> !</span>':'';
         var ev=sub&&sub.last_event;
-        var lastEv=ev?fmtAgo(ev.timestamp_epoch):'—';
+        var counts=sub&&sub.event_counts||{};
+        var totalEvs=Object.values(counts).reduce(function(a,b){return a+b;},0);
+        var unknownEvs=counts.unknown||0;
+        var lastEv=ev?fmtAgo(ev.timestamp_epoch):(totalEvs?'<span class="warn" title="Events are arriving but none match a known topic — check ONVIF Creds tab for topic strings">'+totalEvs+' event'+(totalEvs===1?'':'s')+', all unclassified</span>':'—');
         var kind=ev?'<span class="pill kind-'+esc(ev.kind)+'">'+esc(ev.kind)+'</span> '+esc((ev.topic||'').slice(0,50)):'';
         html+='<div class="cam-row"><span data-label="Name">'+esc(c.name)+'</span><span data-label="IP"><code>'+esc(c.host||'?')+'</code></span><span data-label="Protect state">'+esc(c.state||'')+'</span><span data-label="ONVIF sub" class="'+subCls+'">'+esc(subStat)+errIndicator+subExtra+'</span><span data-label="Last event">'+lastEv+'</span><span data-label="Kind / topic">'+kind+'</span></div>';
       });html+='</div>';camsEl.innerHTML=html;
@@ -1018,9 +1021,10 @@ class BridgeWebTool:
         except RuntimeError as exc:
             return web.json_response({"ok": False, "message": str(exc)})
 
-        # Cancel the live subscription for this camera so the discovery
-        # loop re-creates it with the new credentials.
+        # Cancel the live subscription for this camera and immediately
+        # trigger discovery so it re-creates with the new credentials.
         self._cancel_subscriptions([pid])
+        self._trigger_discovery()
 
         return web.json_response({
             "ok": True,
@@ -1068,6 +1072,7 @@ class BridgeWebTool:
                 "consecutive_failures": sub.consecutive_failures,
                 "last_pull_epoch": sub.last_pull_epoch,
                 "last_error": sub.last_error,
+                "event_counts": dict(sub.event_counts),
                 "last_event": (
                     {
                         "topic": ev.topic, "kind": ev.kind,
