@@ -190,20 +190,26 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
     pwd = unifi_cfg.get("password", "")
     api_key = unifi_cfg.get("api_key", "")
 
-    if not host or not (user and pwd):
-        last_discovery_error = "missing unifi host / username / password"
+    if not host or not ((user and pwd) or api_key):
+        last_discovery_error = "missing unifi host — need username+password or api_key in config"
+        logger.warning("Discovery skipped: %s", last_discovery_error)
         return
 
+    logger.info("Discovery starting — querying Protect at %s", host)
     try:
         cams = await discover_adopted_onvif_cameras(host, user, pwd, api_key=api_key)
     except UniFiAuthError as exc:
         last_discovery_error = f"Protect login failed: {exc}"
         last_discovery_epoch = time.time()
+        logger.warning("Discovery failed — Protect login error: %s", exc)
         return
     except Exception as exc:  # noqa: BLE001
         last_discovery_error = f"discovery error: {exc}"
         last_discovery_epoch = time.time()
+        logger.warning("Discovery failed — %s", exc)
         return
+
+    logger.info("Discovery found %d camera(s) in Protect", len(cams))
 
     last_discovery_error = ""
     last_discovery_epoch = time.time()
@@ -219,6 +225,9 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
 
     # Reconcile: start new, cancel removed.
     seen_ids: set[str] = set()
+    new_count = 0
+    skipped_count = 0
+    locked_count = 0
     for cam in cams:
         if not cam.protect_id:
             continue
@@ -228,6 +237,7 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
             if existing is not None and existing.auth_locked:
                 # Auth failed previously — don't auto-restart; user must
                 # update creds or press Retry to clear the lock.
+                locked_count += 1
                 continue
             if existing is not None and existing.onvif_host != cam.host:
                 # IP changed — restart the subscription.
@@ -237,6 +247,7 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
                 subscription_tasks.pop(cam.protect_id, None)
                 subscriptions.pop(cam.protect_id, None)
             else:
+                logger.debug("Camera %s already tracked, no changes", cam.name)
                 continue
 
         u, p, port = _onvif_creds_for(cam, cfg)
@@ -247,6 +258,7 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
                 "per-camera `onvif_username` / `onvif_password`.",
                 cam.name,
             )
+            skipped_count += 1
             continue
 
         sub = CameraSubscription(
@@ -259,21 +271,30 @@ async def _reconcile(cfg: dict, pusher: ProtectPusher) -> None:
             _run_subscription(sub, pusher),
             name=f"onvif-sub-{cam.name}",
         )
-        logger.info("Tracking %s (Protect id=%s, %s:%d)",
-                    cam.name, cam.protect_id, cam.host, port)
+        logger.info("Starting ONVIF subscription for %s (%s:%d, Protect id=%s)",
+                    cam.name, cam.host, port, cam.protect_id)
+        new_count += 1
 
     # Cancel subscriptions for cameras that vanished from Protect.
+    removed_count = 0
     for stale_id in list(subscription_tasks.keys()):
         if stale_id in seen_ids:
             continue
-        logger.info("Camera %s removed from Protect — stopping subscription",
-                    subscriptions.get(stale_id, CameraSubscription(
-                        protect_id="", name=stale_id, onvif_host="", onvif_port=0,
-                        username="", password="",
-                    )).name)
+        stale_name = subscriptions.get(stale_id, CameraSubscription(
+            protect_id="", name=stale_id, onvif_host="", onvif_port=0,
+            username="", password="",
+        )).name
+        logger.info("Camera %s no longer in Protect — stopping subscription", stale_name)
         subscription_tasks[stale_id].cancel()
         subscription_tasks.pop(stale_id, None)
         subscriptions.pop(stale_id, None)
+        removed_count += 1
+
+    logger.info(
+        "Discovery complete: %d tracked, %d new, %d removed, %d skipped (no ONVIF creds)%s",
+        len(subscriptions), new_count, removed_count, skipped_count,
+        f", {locked_count} auth-locked (use Retry button)" if locked_count else "",
+    )
 
 
 async def _discovery_loop(
@@ -281,9 +302,8 @@ async def _discovery_loop(
 ) -> None:
     """Wait for a trigger event, run reconciliation, repeat.
 
-    trigger is pre-set before the task starts so the first discovery
-    runs immediately on startup without needing the user to press the
-    button.
+    Starts idle; only runs when trigger is set (via the "Get cameras from
+    Protect" button or an explicit `trigger_discovery()` API call).
     """
     global is_discovering
     while True:
@@ -319,10 +339,9 @@ async def main() -> None:
     )
     await pusher.start()
 
-    # Event-driven discovery: pre-set so the first run happens on startup;
-    # the "Get cameras from Protect" button sets it again for manual re-discovery.
+    # Event-driven discovery: only fires when the user presses
+    # "Get cameras from Protect". Not pre-set — bridge starts idle.
     discover_event = asyncio.Event()
-    discover_event.set()
 
     # Lightweight web UI — run alongside the discovery loop.
     web_task: asyncio.Task | None = None

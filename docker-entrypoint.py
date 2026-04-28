@@ -8,9 +8,9 @@ mode (ONVIF bridge by default, full spoof+inference if requested).
 
 Logic:
   1. If /config/config.yml already exists AND UNIFI_HOST is set ->
-     update the unifi connection settings from env vars (so TrueNAS
-     users can change host/creds without manually editing the file).
-     Cameras and AI settings in the file are preserved.
+     all env vars are seed-only: only applied when the config field is
+     currently empty, so web-UI-saved values survive container upgrades.
+     Cameras and other settings are never touched.
   2. If /config/config.yml already exists and no UNIFI_HOST is set ->
      use it as-is (standalone Docker, user-managed).
   3. If no config.yml but UNIFI_HOST is set -> generate a minimal
@@ -41,10 +41,13 @@ CONFIG_PATH = Path("/config/config.yml")
 
 
 def apply_env_overrides():
-    """Update an existing config.yml from env vars.
+    """Seed an existing config.yml from env vars where fields are missing.
 
-    Only touches keys that have a corresponding env var set.
-    Cameras, AI settings, web_tool, and everything else are preserved.
+    All env vars (host, credentials, ONVIF creds) are seed-only: they are
+    only written when the config field is currently empty — once saved via the
+    web UI or a previous run they are left untouched, so a container upgrade
+    never silently overwrites user settings.
+    Cameras, AI settings, web_tool, and everything else are always preserved.
     """
     host = os.environ.get("UNIFI_HOST")
     if not host:
@@ -64,7 +67,7 @@ def apply_env_overrides():
     unifi = cfg.setdefault("unifi", {})
     changed = False
 
-    if unifi.get("host") != host:
+    if not unifi.get("host"):
         unifi["host"] = host
         changed = True
 
@@ -75,18 +78,21 @@ def apply_env_overrides():
         ("UNIFI_API_KEY", "api_key"),
     ]:
         val = os.environ.get(env_key)
-        if val and unifi.get(cfg_key) != val:
+        # Only seed the credential if the config field is currently empty —
+        # once a value exists (set via the web UI or a previous run) we leave
+        # it alone so a container upgrade doesn't silently overwrite it.
+        if val and not unifi.get(cfg_key):
             unifi[cfg_key] = val
             changed = True
 
-    # Bridge-mode-specific overrides — harmless on full mode.
+    # Bridge-mode-specific: same seed-only logic — don't overwrite saved values.
     onvif = cfg.setdefault("onvif", {})
     for env_key, cfg_key in [
         ("ONVIF_USERNAME", "username"),
         ("ONVIF_PASSWORD", "password"),
     ]:
         val = os.environ.get(env_key)
-        if val and onvif.get(cfg_key) != val:
+        if val and not onvif.get(cfg_key):
             onvif[cfg_key] = val
             changed = True
     if not onvif:
