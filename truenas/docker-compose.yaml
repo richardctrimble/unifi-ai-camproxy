@@ -3,24 +3,37 @@
 # How to use:
 #   1. In TrueNAS web UI: Apps > Discover Apps > Custom App > Install via YAML
 #   2. Paste this file into the editor
-#   3. Edit the four values marked CHANGE ME below
+#   3. Edit the values marked CHANGE ME below
 #   4. (Optional) Uncomment the hardware-acceleration block for your
 #      system — Intel iGPU / dGPU / NPU (OpenVINO) or NVIDIA CUDA.
 #   5. Click Save — TrueNAS will pull the image and start the container
-#   6. Open http://<truenas-ip>:8091/ to add cameras via the web UI
+#   6. Open http://<truenas-ip>:8091/ to configure via the web UI
 #
-# Camera + AI settings (including per-camera "Inference Device") are
-# managed through the web UI, not here. This compose file only needs
-# your Protect credentials and a storage path.
+# Updating to a newer build:
+#   `pull_policy: always` (set below) tells Docker to re-pull the image
+#   every time the container starts. So in TrueNAS: Apps > the app >
+#   Stop, then Start. The Start cycle re-pulls :latest from GHCR.
+#   Without pull_policy: always, clicking "Update" or restarting will
+#   reuse the cached image — that's why "no changes" happens.
 #
-# The :latest image ships CPU PyTorch + Intel OpenVINO and covers
-# most TrueNAS Scale systems (which typically run Intel CPUs with
-# integrated graphics). For NVIDIA GPU acceleration use the :cuda
-# image tag instead and uncomment the NVIDIA block below.
+# Image variants (all live in the same package, distinguished by tag):
+#   :latest        ONVIF bridge — discovers ONVIF cams adopted in Protect
+#                  and bridges their event stream to Alarm Manager. ~150MB.
+#                  No local AI, no GPU needed. Primary image. (DEFAULT here)
+#   :detect        Person/vehicle detection (CPU + Intel OpenVINO). ~1.5GB.
+#                  Spoofs RTSP cams into Protect with on-board AI events.
+#   :detect-cuda   Same as :detect, NVIDIA CUDA build. ~2.5GB.
+#   :lines         :detect + virtual line-crossing zones. ~1.5GB.
+#   :full          Legacy all-in-one detect+lines (CPU + Intel). ~1.5GB.
+#   :full-cuda     Legacy all-in-one (NVIDIA CUDA). ~2.5GB.
+#
+# Bridge mode (:latest, default) requires ONVIF cams already adopted to
+# Protect natively. For RTSP-only cams or DIY AI events, switch to
+# :detect / :lines / :full and follow the README quick-starts.
 
 # x-portals tells TrueNAS Scale to show a "Web UI" button on the app
-# card that opens the embedded config/line-drawing UI. The host/port
-# here must match WEB_TOOL_PORT below.
+# card that opens the embedded config UI. The host/port here must match
+# WEB_TOOL_PORT below.
 x-portals:
   - name: Web UI
     scheme: http
@@ -30,10 +43,14 @@ x-portals:
 
 services:
   unifi-ai-camproxy:
-    # Default: CPU + Intel OpenVINO image (~1.5GB).
-    # For NVIDIA GPU hosts, swap to the CUDA variant:
-    #   image: ghcr.io/richardctrimble/unifi-ai-camproxy:cuda
+    # Default: ONVIF bridge image (~150 MB).
+    # For DIY AI / RTSP-only cams swap to one of the other variants —
+    # e.g. :detect, :lines, :detect-cuda, :full, :full-cuda. See above.
     image: ghcr.io/richardctrimble/unifi-ai-camproxy:latest
+    # Re-pull :latest from GHCR on every container start. Without this
+    # TrueNAS reuses whatever it cached the first time you installed —
+    # so "Update" or "Restart" silently runs the old image.
+    pull_policy: always
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -43,21 +60,32 @@ services:
       - PYTHONUNBUFFERED=1
       # CHANGE ME: IP of your UDM / UDM Pro / UNVR
       - UNIFI_HOST=192.168.1.1
-      # CHANGE ME: local Protect account username
+      # CHANGE ME: UniFi OS account username (used for ONVIF discovery in
+      # bridge mode; used for camera adoption in detect/lines/full modes).
       - UNIFI_USERNAME=your-username
-      # CHANGE ME: local Protect account password
+      # CHANGE ME: UniFi OS account password
       - UNIFI_PASSWORD=your-password
+      # CHANGE ME (bridge mode only): API key generated in Protect →
+      # Settings → Control Plane → Integrations → Create API Key. Used to
+      # fire Alarm Manager webhooks. Leave blank for detect/lines/full.
+      # - UNIFI_API_KEY=
+      # CHANGE ME (bridge mode only): fleet ONVIF credentials applied to
+      # every discovered camera unless overridden per-camera in the web UI.
+      # - ONVIF_USERNAME=admin
+      # - ONVIF_PASSWORD=onvif-camera-password
       - WEB_TOOL_PORT=8091
       # Optional: increase log verbosity for troubleshooting.
       # - LOG_LEVEL=DEBUG
 
     # ─────────────────────────────────────────────────────────────────────
-    # Hardware acceleration — uncomment ONE block that matches your host.
+    # Hardware acceleration — only relevant if you switched to a non-bridge
+    # image variant (:detect / :lines / :full / *-cuda). The :latest bridge
+    # image runs no inference and ignores GPU passthrough.
     #
     # Option A — Intel iGPU / dGPU / NPU (OpenVINO)
-    #   Works with the default :latest image above. Covers Intel N100,
-    #   Iris Xe, Arc, Meteor / Arrow Lake NPUs. Requires /dev/dri to
-    #   exist on the host and your user to be in the "render" group.
+    #   Works with :detect / :lines / :full. Covers Intel N100, Iris Xe,
+    #   Arc, Meteor / Arrow Lake NPUs. Requires /dev/dri to exist on the
+    #   host and your user to be in the "render" group.
     # ─────────────────────────────────────────────────────────────────────
     # devices:
     #   - /dev/dri:/dev/dri
@@ -67,9 +95,9 @@ services:
 
     # ─────────────────────────────────────────────────────────────────────
     # Option B — NVIDIA GPU (CUDA)
-    #   Switch the image tag above to :cuda and uncomment the block below.
-    #   Requires nvidia-container-toolkit installed on the TrueNAS host
-    #   (TrueNAS Scale 24.10+ supports it out of the box on most builds).
+    #   Switch the image tag above to :detect-cuda or :full-cuda and
+    #   uncomment the block below. Requires nvidia-container-toolkit
+    #   installed on the TrueNAS host (Scale 24.10+ ships it on most builds).
     # ─────────────────────────────────────────────────────────────────────
     # deploy:
     #   resources:
