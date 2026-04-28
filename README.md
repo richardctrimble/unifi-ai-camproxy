@@ -2,16 +2,17 @@
 
 [![Docker](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/richardctrimble/unifi-ai-camproxy/actions/workflows/docker-publish.yml)
 
-A DIY UniFi camera AI tooling. Two modes ship side by side:
+A DIY UniFi camera AI tooling. Four images ship side by side, each
+targeting a specific use case so they stay independently maintained:
 
-- **ONVIF bridge** *(`:latest`, primary, lightweight ~150 MB)* — your
-  cameras are adopted natively in Protect; we subscribe to their ONVIF
-  event streams and bridge person/vehicle/motion/line-crossing events
-  into Protect's timeline as bookmarks + Alarm Manager triggers. No
-  spoofing, no transcoding, native H.265.
-- **Full mode** *(`:full`, heavier ~2.5 GB)* — spoofs an RTSP camera as
-  a UniFi camera in Protect and runs YOLOv8 inference locally
-  (CPU/Intel/CUDA). Useful when your cameras don't have onboard AI.
+| Image | Tag | Size | Use |
+|---|---|---|---|
+| ONVIF bridge | `:latest` | ~150 MB | Cameras already adopted in Protect; bridges their ONVIF events into Alarm Manager. No local AI. |
+| Detect | `:detect` | ~1.5 GB | Spoofs RTSP cameras in Protect + YOLOv8 person/vehicle detection (CPU + Intel OpenVINO). |
+| Detect CUDA | `:detect-cuda` | ~2.5 GB | Same as detect, NVIDIA CUDA (opt-in build). |
+| Lines | `:lines` | ~1.5 GB | Same as detect + virtual line-crossing zones. CPU + Intel OpenVINO. |
+| Legacy full | `:full` | ~1.5 GB | All-in-one detect+lines (CPU + Intel). Kept for backwards compat. |
+| Legacy full CUDA | `:full-cuda` | ~2.5 GB | All-in-one CUDA variant. |
 
 > **Status**: ONVIF bridge is **in development** — discovery is live,
 > ONVIF subscriptions work, and alarm webhooks fire. The web UI now has
@@ -52,12 +53,12 @@ something Protect's UI surfaces.
 - For full mode: at least one RTSP camera on the LAN
 - For bridge mode: cameras adopted to Protect via ONVIF
 
-## Quick start (full mode — works today)
+## Quick start (detect — person/vehicle detection)
 
 ```bash
 git clone https://github.com/richardctrimble/unifi-ai-camproxy.git
 cd unifi-ai-camproxy
-docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.detect.yml up -d --build
 ```
 
 Open `http://<docker-host>:8091/` and:
@@ -66,8 +67,25 @@ Open `http://<docker-host>:8091/` and:
 2. **Setup** tab — *+ Add Camera*, paste an RTSP URL, *Save All*.
 3. Restart the container.
 
-The camera auto-adopts. If a pending record gets stuck with a bad IP,
-the UniFi tab's *Cameras in Protect* panel can remove it.
+The camera auto-adopts in Protect and fires person/vehicle detection events.
+
+## Quick start (lines — virtual line-crossing)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.lines.yml up -d --build
+```
+
+Same setup as detect. After cameras are live, open the **Lines** tab and click
+two points on a camera frame to define a virtual tripwire. Crossings fire as
+detection events in Protect.
+
+## Quick start (detect-cuda — NVIDIA GPU)
+
+Install [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) first, then:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.detect-cuda.yml up -d --build
+```
 
 ## Quick start (ONVIF bridge — in development)
 
@@ -91,40 +109,40 @@ Discovery runs every 60s. Cameras show on the **Status** tab.
 
 ## Images
 
-| Tag | Built by | Size | Use |
+| Tag | Dockerfile | Size | Description |
 |---|---|---|---|
-| `:latest` | `Dockerfile` | ~150 MB | ONVIF bridge (primary, in preparation) |
-| `:full` | `Dockerfile.full` | ~2.5 GB | Full spoof+inference: CPU + Intel OpenVINO |
-| `:full-cuda` | `Dockerfile.full-cuda` | ~3 GB | Full + NVIDIA CUDA (opt-in CI build) |
+| `:latest` | `Dockerfile` | ~150 MB | ONVIF bridge — primary image |
+| `:detect` | `Dockerfile.detect` | ~1.5 GB | Person/vehicle detection (CPU + Intel) |
+| `:detect-cuda` | `Dockerfile.detect-cuda` | ~2.5 GB | Person/vehicle detection (NVIDIA CUDA, opt-in) |
+| `:lines` | `Dockerfile.lines` | ~1.5 GB | Line-crossing detection (CPU + Intel) |
+| `:full` | `Dockerfile.full` | ~1.5 GB | Legacy all-in-one (CPU + Intel) |
+| `:full-cuda` | `Dockerfile.full-cuda` | ~2.5 GB | Legacy all-in-one (NVIDIA CUDA, opt-in) |
 
-Calver tags get matching variants:
-`:2026.4.14`, `:2026.4.14-full`, `:2026.4.14-full-cuda`.
+Calver tags get matching per-image suffixes:
+`:2026.4.14`, `:2026.4.14-detect`, `:2026.4.14-detect-cuda`, `:2026.4.14-lines`, `:2026.4.14-full`, `:2026.4.14-full-cuda`.
 
-## Hardware acceleration (full mode only)
+## Hardware acceleration (detect / lines / full modes)
 
 Inference device is per-camera. Set it in the Setup tab or leave as
 `auto` (probes in order: `cuda` → `intel:gpu` → `intel:npu` → `mps` →
 `cpu`).
 
-**Intel iGPU / dGPU / NPU**:
+**Intel iGPU / dGPU / NPU** — pass `/dev/dri` through (same for all non-CUDA images):
 
 ```bash
 docker compose -f docker-compose.yml \
-  -f docker-compose.full.yml \
+  -f docker-compose.detect.yml \
   -f docker-compose.intel.yml up -d
 ```
 
-Host needs `/dev/dri` and your user in the `render` group.
-
-**NVIDIA CUDA** (requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):
+**NVIDIA CUDA** — use the `-cuda` image variant:
 
 ```bash
 docker compose -f docker-compose.yml \
-  -f docker-compose.full.yml \
-  -f docker-compose.gpu.yml up -d --build
+  -f docker-compose.detect-cuda.yml up -d --build
 ```
 
-The bridge mode has no GPU dependency — that's the point.
+The ONVIF bridge (`:latest`) has no GPU dependency — that's the point.
 
 ## Web UI
 

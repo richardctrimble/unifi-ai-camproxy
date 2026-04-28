@@ -22,7 +22,10 @@ import numpy as np
 # Ultralytics YOLOv8 — CPU-friendly on x86, GPU if available
 from ultralytics import YOLO
 
-from line_crossing import LineCrossingDetector
+try:
+    from line_crossing import LineCrossingDetector as _LineCrossingDetector
+except ImportError:
+    _LineCrossingDetector = None  # not present in detect-only images
 
 
 # YOLO class IDs we care about
@@ -248,11 +251,13 @@ class AIEngine:
         self._stream_connected: bool = False
         self._last_inference_ms: float = 0.0
 
-        # Virtual line crossing — lives here so we can check per-frame
-        # against the freshly-updated centroid pair on each tracked object.
+        # Virtual line crossing — only active when line_crossing module is
+        # present (lines image). Detect-only images omit line_crossing.py
+        # and get None here, which is checked before every use.
         lines_config = config.get("lines", []) or []
-        self.line_detector = LineCrossingDetector(
-            lines_config, logger=logger.getChild("lc")
+        self.line_detector = (
+            _LineCrossingDetector(lines_config, logger=logger.getChild("lc"))
+            if _LineCrossingDetector is not None else None
         )
 
     # ─── Device resolution & model loading ──────────────────────────────────
@@ -547,7 +552,7 @@ class AIEngine:
                 # Check virtual line crossings against the freshly
                 # updated centroid pair. A crossing emits a discrete
                 # "start" event that Protect surfaces in the timeline.
-                if self.line_detector.lines:
+                if self.line_detector is not None and self.line_detector.lines:
                     crossed = self.line_detector.check(
                         obj.prev_centroid, obj.centroid
                     )

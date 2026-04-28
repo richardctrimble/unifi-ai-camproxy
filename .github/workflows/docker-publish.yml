@@ -1,27 +1,33 @@
 # Build and publish Docker images to GitHub Container Registry (GHCR).
 #
-# Three images live in the same GHCR package and are distinguished by tag:
+# Six images live in the same GHCR package and are distinguished by tag:
 #
-#   ghcr.io/richardctrimble/unifi-ai-camproxy:latest      ← ONVIF bridge (primary, lightweight)
-#   ghcr.io/richardctrimble/unifi-ai-camproxy:full        ← full spoof+inference (CPU + Intel)
-#   ghcr.io/richardctrimble/unifi-ai-camproxy:full-cuda   ← full spoof+inference (NVIDIA CUDA)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:latest         ← ONVIF bridge (primary, lightweight)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:detect         ← person/vehicle detection (CPU + Intel)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:detect-cuda    ← person/vehicle detection (NVIDIA CUDA)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:lines          ← line-crossing detection (CPU + Intel)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:full           ← legacy all-in-one (CPU + Intel)
+#   ghcr.io/richardctrimble/unifi-ai-camproxy:full-cuda      ← legacy all-in-one (NVIDIA CUDA)
 #
 # Calver versioning: YYYY.M.R where M is the month (no leading zero) and
 # R is the release number within that month (e.g. 2026.4.1, 2026.4.14).
 # Each calver tag has matching variants:
 #
-#   :2026.4.14         → ONVIF bridge
-#   :2026.4.14-full    → full image
-#   :2026.4.14-full-cuda → full + CUDA
+#   :2026.4.14             → ONVIF bridge
+#   :2026.4.14-detect      → detection
+#   :2026.4.14-detect-cuda → detection CUDA
+#   :2026.4.14-lines       → line-crossing
+#   :2026.4.14-full        → legacy full image
+#   :2026.4.14-full-cuda   → legacy full + CUDA
 #
 # Automatic build triggers:
-#   push to main          → :latest, :full, :sha-<short> (and :sha-...-full)
-#   push tag 2026.4.1     → :2026.4.1, :2026.4.1-full, :latest, :full
+#   push to main          → :latest, :detect, :lines, :full (+ sha variants)
+#   push tag 2026.4.1     → calver variants for all above
 #   pull_request          → build-only (no push), validates Dockerfiles
 #
-# ── CUDA build is OPTIONAL ────────────────────────────────────────────────────
+# ── CUDA builds are OPTIONAL ─────────────────────────────────────────────────
 # Large and slow. Skipped by default. Enable with one of:
-#   1. Manual trigger (workflow_dispatch): check "Build CUDA image" box.
+#   1. Manual trigger (workflow_dispatch): check "Build CUDA images" box.
 #   2. Repo variable: BUILD_CUDA=true under Settings → Variables.
 
 name: Docker
@@ -38,7 +44,7 @@ on:
   workflow_dispatch:
     inputs:
       build_cuda:
-        description: "Build the CUDA (full-cuda) container image"
+        description: "Build the CUDA images (detect-cuda, full-cuda)"
         required: false
         default: false
         type: boolean
@@ -224,6 +230,148 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=full-cuda
           cache-to: type=gha,mode=max,scope=full-cuda
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ needs.tag.outputs.tag || github.ref_name }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+
+  # ── Detection image (CPU + Intel OpenVINO) ─────────────────────────────────
+  build-detect:
+    name: Build & push (detect → :detect)
+    runs-on: ubuntu-latest
+    needs: tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (detect)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/richardctrimble/unifi-ai-camproxy
+          tags: |
+            type=ref,event=branch,suffix=-detect
+            type=ref,event=tag,suffix=-detect
+            type=sha,prefix=sha-,suffix=-detect
+            type=raw,value=detect,enable={{is_default_branch}}
+            type=raw,value=${{ needs.tag.outputs.tag }}-detect,enable=${{ needs.tag.outputs.tag != '' }}
+
+      - name: Build and push (detect)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.detect
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=detect
+          cache-to: type=gha,mode=max,scope=detect
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ needs.tag.outputs.tag || github.ref_name }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+
+  # ── Detection image (NVIDIA CUDA, optional) ────────────────────────────────
+  build-detect-cuda:
+    name: Build & push (detect-cuda → :detect-cuda)
+    runs-on: ubuntu-latest
+    needs: tag
+    if: inputs.build_cuda == true || vars.BUILD_CUDA == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (detect-cuda)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/richardctrimble/unifi-ai-camproxy
+          tags: |
+            type=ref,event=branch,suffix=-detect-cuda
+            type=ref,event=tag,suffix=-detect-cuda
+            type=sha,prefix=sha-,suffix=-detect-cuda
+            type=raw,value=detect-cuda,enable={{is_default_branch}}
+            type=raw,value=${{ needs.tag.outputs.tag }}-detect-cuda,enable=${{ needs.tag.outputs.tag != '' }}
+
+      - name: Build and push (detect-cuda)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.detect-cuda
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=detect-cuda
+          cache-to: type=gha,mode=max,scope=detect-cuda
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ needs.tag.outputs.tag || github.ref_name }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+
+  # ── Line-crossing image (CPU + Intel OpenVINO) ─────────────────────────────
+  build-lines:
+    name: Build & push (lines → :lines)
+    runs-on: ubuntu-latest
+    needs: tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (lines)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/richardctrimble/unifi-ai-camproxy
+          tags: |
+            type=ref,event=branch,suffix=-lines
+            type=ref,event=tag,suffix=-lines
+            type=sha,prefix=sha-,suffix=-lines
+            type=raw,value=lines,enable={{is_default_branch}}
+            type=raw,value=${{ needs.tag.outputs.tag }}-lines,enable=${{ needs.tag.outputs.tag != '' }}
+
+      - name: Build and push (lines)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.lines
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=lines
+          cache-to: type=gha,mode=max,scope=lines
           build-args: |
             GIT_SHA=${{ github.sha }}
             GIT_REF=${{ needs.tag.outputs.tag || github.ref_name }}
